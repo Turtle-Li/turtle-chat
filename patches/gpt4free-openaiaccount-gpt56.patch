@@ -4654,6 +4654,63 @@ index cf7bd36..f7b0b4d 100644
              except TypeError as e:
                  raise RuntimeError(f"Failed to save: {auth_result.get_dict()}\n{type(e).__name__}: {e}")
           # elif cache_file.exists():
+diff --git a/g4f/providers/tool_support.py b/g4f/providers/tool_support.py
+index 94b1088..a8352ab 100644
+--- a/g4f/providers/tool_support.py
++++ b/g4f/providers/tool_support.py
+@@ -57,6 +57,18 @@ def _parse_json_maybe(s: str):
+             return None
+ 
+ 
++def _may_be_tool_call_prefix(text: str) -> bool:
++    """Return whether streamed text could still become an emulated tool call.
++
++    Tool emulation asks the model for a JSON object, JSON array, or a fenced
++    JSON payload.  Keep only those ambiguous prefixes buffered.  Once the first
++    non-whitespace character is ordinary prose, the response cannot match the
++    supported tool-call encodings and can be streamed immediately.
++    """
++    stripped = text.lstrip()
++    return not stripped or stripped.startswith(("{", "[", "`"))
++
++
+ def _stringify_tool_calls(tool_calls: list) -> str:
+     """Render an assistant ``tool_calls`` list as a human-readable text block."""
+     parts = []
+@@ -418,6 +430,7 @@ class ToolSupportProvider(AsyncGeneratorProvider):
+         finish = None
+         content_chunks: list[str] = []
+         has_usage = False
++        passthrough = bool(stream and (not tool_names or tool_choice == "none"))
+ 
+         method = get_async_provider_method(provider)
+         async for chunk in method(
+@@ -430,6 +443,13 @@ class ToolSupportProvider(AsyncGeneratorProvider):
+         ):
+             if isinstance(chunk, str):
+                 content_chunks.append(chunk)
++                if stream:
++                    if passthrough:
++                        yield chunk
++                    elif not _may_be_tool_call_prefix("".join(content_chunks)):
++                        passthrough = True
++                        for buffered_chunk in content_chunks:
++                            yield buffered_chunk
+             elif isinstance(chunk, Reasoning):
+                 # Forward thinking output to the client; do not mix it into
+                 # the content that will be parsed as a tool-call JSON.
+@@ -453,6 +473,11 @@ class ToolSupportProvider(AsyncGeneratorProvider):
+ 
+         content = "".join(content_chunks)
+ 
++        if passthrough:
++            if finish is not None:
++                yield finish
++            return
++
+         if tool_names:
+             payload = filter_json(content)
+             obj = _parse_json_maybe(payload)
 diff --git a/g4f/requests/__init__.py b/g4f/requests/__init__.py
 index 205a41d..09f27dc 100644
 --- a/g4f/requests/__init__.py
