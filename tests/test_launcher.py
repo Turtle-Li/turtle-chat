@@ -252,6 +252,8 @@ def test_gpt4free_overlay_forwards_only_a_bounded_rate_limit_reset_hint() -> Non
     assert '+    suffix = f"; turtle_retry_after_s={retry_after}"' in overlay
     assert "+        return min(24 * 60 * 60, max(1, int(numeric)))" in overlay
     assert "+                        raise await _rate_limit_error(response)" in overlay
+    assert "+            if _payload_has_explicit_rate_limit(line):" in overlay
+    assert "+                raise _explicit_rate_limit_exception(line)" in overlay
 
 
 def test_gpt4free_overlay_preserves_upstream_thought_summary() -> None:
