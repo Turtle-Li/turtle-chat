@@ -64,6 +64,7 @@
   const selectionStates = new Map();
   let chatQuota = null;
   let chatSubscription = null;
+  let chatPolicyIsAdmin = false;
   let fallbackNotice = null;
   let policyLoaded = false;
   let policyLoading = false;
@@ -1483,6 +1484,7 @@
       allowedSelections = new Set(payload.allowed);
       chatQuota = payload.quota || null;
       chatSubscription = payload.subscription || null;
+      chatPolicyIsAdmin = payload.is_admin === true;
       selectionStates.clear();
       Object.entries(payload.quota?.models || {}).forEach(([key, value]) => {
         selectionStates.set(key, value);
@@ -1538,6 +1540,7 @@
 
   const laneRefreshText = (lane) => {
     if (!lane?.allowed) return "当前套餐未开放";
+    if (lane.limit_count == null && chatPolicyIsAdmin) return "不受站内次数限制";
     if (lane.limit_count == null) return "以上游动态额度为准";
     const reset = formatRemainingTime(lane.reset_at);
     if (reset) return `${reset}后刷新`;
@@ -1549,6 +1552,7 @@
     if (!lane?.allowed) return "当前分组不可用";
     const refresh = laneRefreshText(lane);
     if (!lane.available) return `已用完 · ${refresh}`;
+    if (lane.limit_count == null && chatPolicyIsAdmin) return "管理员不限额";
     if (lane.limit_count == null) return "动态额度 · 以上游为准";
     const remaining = Number(lane.remaining_count || 0);
     const base = `剩余 ${remaining}/${Number(lane.limit_count)}`;
@@ -1574,6 +1578,12 @@
       return indicator;
     }
     if (lane.limit_count == null) {
+      if (chatPolicyIsAdmin) {
+        indicator.dataset.kind = "unlimited";
+        value.textContent = "管理员不限额";
+        indicator.append(value, refresh);
+        return indicator;
+      }
       indicator.dataset.kind = "dynamic";
       value.textContent = "动态额度";
       indicator.append(value, refresh);
@@ -2274,6 +2284,7 @@
       policyLoadedAt = 0;
       chatQuota = null;
       chatSubscription = null;
+      chatPolicyIsAdmin = false;
       resetAnnouncement();
     }
     if (sessionRole) sessionStorage.setItem(SESSION_ROLE_KEY, sessionRole);

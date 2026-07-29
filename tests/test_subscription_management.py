@@ -77,6 +77,9 @@ def test_chat_ui_blocks_pending_and_expired_without_hiding_pages() -> None:
     assert "turtleAccessDisabled" in script
     assert "chatSubscription?.active" in script
     assert "动态额度 · 以上游为准" in script
+    assert "chatPolicyIsAdmin = payload.is_admin === true" in script
+    assert "管理员不限额" in script
+    assert "不受站内次数限制" in script
     assert "turtle-model-controls.js?v=20260728.10" in patcher
     assert "custom.css?v=20260729.1" in patcher
     assert "turtle-storage-controls.js?v=20260729.1" in patcher
