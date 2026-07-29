@@ -95,8 +95,16 @@ class UpstreamStageMetrics:
     prepare_ms: int = 0
     requirements_ms: int = 0
     submit_headers_ms: int = 0
+    submit_namelookup_ms: int = 0
+    submit_connect_ms: int = 0
+    submit_appconnect_ms: int = 0
+    submit_pretransfer_ms: int = 0
+    submit_starttransfer_ms: int = 0
+    submit_server_wait_ms: int = 0
     first_event_ms: int = 0
     pre_stream_ms: int = 0
+    provider_first_parsed_string_ms: int = 0
+    upstream_events_before_first_parsed_string: int = 0
     provider_first_emitted_string_ms: int = 0
     handoff_used: int = 0
     handoff_seen_ms: int = 0
@@ -122,8 +130,16 @@ class UpstreamStageMetrics:
                 self.prepare_ms,
                 self.requirements_ms,
                 self.submit_headers_ms,
+                self.submit_namelookup_ms,
+                self.submit_connect_ms,
+                self.submit_appconnect_ms,
+                self.submit_pretransfer_ms,
+                self.submit_starttransfer_ms,
+                self.submit_server_wait_ms,
                 self.first_event_ms,
                 self.pre_stream_ms,
+                self.provider_first_parsed_string_ms,
+                self.upstream_events_before_first_parsed_string,
                 self.provider_first_emitted_string_ms,
                 self.handoff_used,
                 self.handoff_seen_ms,
@@ -766,7 +782,7 @@ def extract_upstream_stage_metrics(
     if not isinstance(conversation, dict):
         return UpstreamStageMetrics()
     metrics = conversation.get("turtle_upstream_stage_metrics")
-    if not isinstance(metrics, dict) or metrics.get("v") not in {1, 2}:
+    if not isinstance(metrics, dict) or metrics.get("v") not in {1, 2, 3}:
         return UpstreamStageMetrics()
     schema_version = int(metrics["v"])
 
@@ -800,8 +816,36 @@ def extract_upstream_stage_metrics(
         prepare_ms=timing("prepare_ms"),
         requirements_ms=timing("requirements_ms"),
         submit_headers_ms=timing("submit_headers_ms"),
+        submit_namelookup_ms=(
+            timing("submit_namelookup_ms") if schema_version >= 3 else 0
+        ),
+        submit_connect_ms=(
+            timing("submit_connect_ms") if schema_version >= 3 else 0
+        ),
+        submit_appconnect_ms=(
+            timing("submit_appconnect_ms") if schema_version >= 3 else 0
+        ),
+        submit_pretransfer_ms=(
+            timing("submit_pretransfer_ms") if schema_version >= 3 else 0
+        ),
+        submit_starttransfer_ms=(
+            timing("submit_starttransfer_ms") if schema_version >= 3 else 0
+        ),
+        submit_server_wait_ms=(
+            timing("submit_server_wait_ms") if schema_version >= 3 else 0
+        ),
         first_event_ms=timing("first_event_ms"),
         pre_stream_ms=timing("pre_stream_ms"),
+        provider_first_parsed_string_ms=(
+            timing("provider_first_parsed_string_ms")
+            if schema_version >= 3
+            else 0
+        ),
+        upstream_events_before_first_parsed_string=(
+            counter("upstream_events_before_first_parsed_string")
+            if schema_version >= 3
+            else 0
+        ),
         provider_first_emitted_string_ms=(
             timing("provider_first_emitted_string_ms")
             if schema_version >= 2

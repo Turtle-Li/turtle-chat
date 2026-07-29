@@ -462,7 +462,12 @@ def test_gpt4free_overlay_has_versioned_handoff_latency_metrics() -> None:
         / "patches/gpt4free-openaiaccount-gpt56.patch"
     ).read_text(encoding="utf-8")
 
-    assert '+        "v": 2,' in overlay
+    assert '+        "v": 3,' in overlay
+    assert '+        "submit_namelookup_ms": 0,' in overlay
+    assert '+        "submit_server_wait_ms": 0,' in overlay
+    assert '+        "provider_first_parsed_string_ms": 0,' in overlay
+    assert '+        "upstream_events_before_first_parsed_string": 0,' in overlay
+    assert "+                    CurlInfo.STARTTRANSFER_TIME," in overlay
     assert '+        "handoff_first_frame_ms": 0,' in overlay
     assert '+        "handoff_first_item_topic_class": 0,' in overlay
     assert '+        "handoff_items_conversations": 0,' in overlay

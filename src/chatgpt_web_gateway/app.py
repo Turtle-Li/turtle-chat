@@ -194,7 +194,7 @@ def _log_upstream_stage_metrics(
     if metrics.empty:
         return
     logger.info(
-        "request_upstream_stage id=%s schema_version=%d home_ms=%d media_ms=%d prepare_ms=%d requirements_ms=%d submit_headers_ms=%d first_event_ms=%d pre_stream_ms=%d provider_first_emitted_string_ms=%d handoff_used=%d handoff_seen_ms=%d handoff_sse_tail_ms=%d handoff_start_ms=%d handoff_endpoint_ms=%d handoff_connect_ms=%d handoff_first_frame_ms=%d handoff_first_item_ms=%d handoff_first_item_topic_class=%d handoff_items_expected=%d handoff_items_conversations=%d handoff_items_unscoped=%d handoff_done_topic_class=%d handoff_total_ms=%d",
+        "request_upstream_stage id=%s schema_version=%d home_ms=%d media_ms=%d prepare_ms=%d requirements_ms=%d submit_headers_ms=%d submit_namelookup_ms=%d submit_connect_ms=%d submit_appconnect_ms=%d submit_pretransfer_ms=%d submit_starttransfer_ms=%d submit_server_wait_ms=%d first_event_ms=%d pre_stream_ms=%d provider_first_parsed_string_ms=%d upstream_events_before_first_parsed_string=%d provider_first_emitted_string_ms=%d handoff_used=%d handoff_seen_ms=%d handoff_sse_tail_ms=%d handoff_start_ms=%d handoff_endpoint_ms=%d handoff_connect_ms=%d handoff_first_frame_ms=%d handoff_first_item_ms=%d handoff_first_item_topic_class=%d handoff_items_expected=%d handoff_items_conversations=%d handoff_items_unscoped=%d handoff_done_topic_class=%d handoff_total_ms=%d",
         request_id,
         metrics.schema_version,
         metrics.home_ms,
@@ -202,8 +202,16 @@ def _log_upstream_stage_metrics(
         metrics.prepare_ms,
         metrics.requirements_ms,
         metrics.submit_headers_ms,
+        metrics.submit_namelookup_ms,
+        metrics.submit_connect_ms,
+        metrics.submit_appconnect_ms,
+        metrics.submit_pretransfer_ms,
+        metrics.submit_starttransfer_ms,
+        metrics.submit_server_wait_ms,
         metrics.first_event_ms,
         metrics.pre_stream_ms,
+        metrics.provider_first_parsed_string_ms,
+        metrics.upstream_events_before_first_parsed_string,
         metrics.provider_first_emitted_string_ms,
         metrics.handoff_used,
         metrics.handoff_seen_ms,

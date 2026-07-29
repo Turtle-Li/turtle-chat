@@ -228,14 +228,22 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
             {
                 "conversation": {
                     "turtle_upstream_stage_metrics": {
-                        "v": 2,
+                        "v": 3,
                         "home_ms": 0,
                         "media_ms": 12_300,
                         "prepare_ms": 240,
                         "requirements_ms": 410,
                         "submit_headers_ms": 90,
+                        "submit_namelookup_ms": 4,
+                        "submit_connect_ms": 38,
+                        "submit_appconnect_ms": 121,
+                        "submit_pretransfer_ms": 124,
+                        "submit_starttransfer_ms": 1_890,
+                        "submit_server_wait_ms": 1_766,
                         "first_event_ms": 2_800,
                         "pre_stream_ms": 15_900,
+                        "provider_first_parsed_string_ms": 7_050,
+                        "upstream_events_before_first_parsed_string": 3,
                         "provider_first_emitted_string_ms": 7_100,
                         "handoff_used": 1,
                         "handoff_seen_ms": 2_810,
@@ -258,9 +266,20 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
         )
 
         self.assertEqual(metrics.media_ms, 12_300)
-        self.assertEqual(metrics.schema_version, 2)
+        self.assertEqual(metrics.schema_version, 3)
+        self.assertEqual(metrics.submit_namelookup_ms, 4)
+        self.assertEqual(metrics.submit_connect_ms, 38)
+        self.assertEqual(metrics.submit_appconnect_ms, 121)
+        self.assertEqual(metrics.submit_pretransfer_ms, 124)
+        self.assertEqual(metrics.submit_starttransfer_ms, 1_890)
+        self.assertEqual(metrics.submit_server_wait_ms, 1_766)
         self.assertEqual(metrics.first_event_ms, 2_800)
         self.assertEqual(metrics.pre_stream_ms, 15_900)
+        self.assertEqual(metrics.provider_first_parsed_string_ms, 7_050)
+        self.assertEqual(
+            metrics.upstream_events_before_first_parsed_string,
+            3,
+        )
         self.assertEqual(metrics.provider_first_emitted_string_ms, 7_100)
         self.assertEqual(metrics.handoff_used, 1)
         self.assertEqual(metrics.handoff_start_ms, 3_100)
@@ -303,3 +322,20 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
         self.assertEqual(legacy.pre_stream_ms, 900)
         self.assertEqual(legacy.handoff_used, 0)
         self.assertEqual(legacy.handoff_total_ms, 0)
+
+        handoff_v2 = extract_upstream_stage_metrics(
+            {
+                "conversation": {
+                    "turtle_upstream_stage_metrics": {
+                        "v": 2,
+                        "submit_headers_ms": 700,
+                        "submit_server_wait_ms": 650,
+                        "handoff_used": 1,
+                    }
+                }
+            }
+        )
+        self.assertEqual(handoff_v2.schema_version, 2)
+        self.assertEqual(handoff_v2.submit_headers_ms, 700)
+        self.assertEqual(handoff_v2.submit_server_wait_ms, 0)
+        self.assertEqual(handoff_v2.handoff_used, 1)
