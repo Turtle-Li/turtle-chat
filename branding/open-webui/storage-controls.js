@@ -19,6 +19,8 @@
     content_type: "image/webp",
     max_bytes: 2 * 1024 * 1024,
   };
+  const IMAGE_PREPARE_CONCURRENCY = 2;
+  const DIRECT_UPLOAD_TRANSFER_CONCURRENCY = 3;
   const previewObjectUrls = new Set();
   const mediaUrlCache = new Map();
   let capturedAuthorization = "";
@@ -66,6 +68,32 @@
   let managedThumbnailScanQueued = false;
 
   const originalFetch = window.fetch.bind(window);
+
+  const createTaskLimiter = (concurrency) => {
+    let active = 0;
+    const pending = [];
+    const drain = () => {
+      while (active < concurrency && pending.length) {
+        const job = pending.shift();
+        active += 1;
+        Promise.resolve()
+          .then(job.task)
+          .then(job.resolve, job.reject)
+          .finally(() => {
+            active -= 1;
+            drain();
+          });
+      }
+    };
+    return (task) =>
+      new Promise((resolve, reject) => {
+        pending.push({ task, resolve, reject });
+        drain();
+      });
+  };
+
+  const runImagePreparation = createTaskLimiter(IMAGE_PREPARE_CONCURRENCY);
+  const runDirectUploadTransfer = createTaskLimiter(DIRECT_UPLOAD_TRANSFER_CONCURRENCY);
 
   const pathOf = (input) => {
     try {
@@ -438,22 +466,28 @@
         throw new Error("静态缩略图上传地址缺失");
       }
       const uploads = [
-        originalFetch(ticket.upload_url, {
-          method: "PUT",
-          headers: ticket.headers || { "Content-Type": file.type },
-          body: file,
-          credentials: "omit",
-          mode: "cors",
-        }),
+        runDirectUploadTransfer(() =>
+          originalFetch(ticket.upload_url, {
+            method: "PUT",
+            headers: ticket.headers || { "Content-Type": file.type },
+            body: file,
+            credentials: "omit",
+            mode: "cors",
+          }),
+        ),
       ];
       if (thumbnail && ticket.thumbnail_upload) {
-        uploads.push(originalFetch(ticket.thumbnail_upload.upload_url, {
-          method: "PUT",
-          headers: ticket.thumbnail_upload.headers || { "Content-Type": STATIC_THUMBNAIL.content_type },
-          body: thumbnail.blob,
-          credentials: "omit",
-          mode: "cors",
-        }));
+        uploads.push(
+          runDirectUploadTransfer(() =>
+            originalFetch(ticket.thumbnail_upload.upload_url, {
+              method: "PUT",
+              headers: ticket.thumbnail_upload.headers || { "Content-Type": STATIC_THUMBNAIL.content_type },
+              body: thumbnail.blob,
+              credentials: "omit",
+              mode: "cors",
+            }),
+          ),
+        );
       }
       const settled = await Promise.allSettled(uploads);
       const rejected = settled.find((result) => result.status === "rejected");
@@ -500,7 +534,9 @@
         return originalFetch(input, init);
       }
       const prepared = originalFile.type.startsWith("image/")
-        ? await prepareImageAssets(originalFile, storageCapability.media)
+        ? await runImagePreparation(() =>
+            prepareImageAssets(originalFile, storageCapability.media),
+          )
         : { file: originalFile, thumbnail: null };
       const file = prepared.file;
       const compressedForm = replaceFormFile(form, file, file !== originalFile);

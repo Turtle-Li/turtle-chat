@@ -106,7 +106,7 @@ replace_once(
 \t\t<link rel="preload" href="/static/turtle-provider-chatgpt.svg" as="image" type="image/svg+xml" />
 \t\t<link rel="preload" href="/static/turtle-provider-claude.svg" as="image" type="image/svg+xml" />
 \t\t<script defer src="/static/turtle-model-controls.js?v=20260728.10" crossorigin="use-credentials"></script>
-\t\t<script defer src="/static/turtle-storage-controls.js?v=20260729.1" crossorigin="use-credentials"></script>
+\t\t<script defer src="/static/turtle-storage-controls.js?v=20260730.1" crossorigin="use-credentials"></script>
 """,
 )
 replace_once(
