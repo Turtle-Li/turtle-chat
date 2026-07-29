@@ -591,8 +591,10 @@ for source_map in Path("/app/build/_app/immutable/chunks").glob("*.js.map"):
     )
     after = (
         "const y=async()=>{const h=E(),O=h?h.scrollHeight:0;"
-        "h&&(h.scrollTop=h.scrollTop+100),x(u,!0);try{let F=!0;"
-        "c().turtlePage?.hasMore&&window.__turtleHistoryPager&&"
+        "h&&(h.scrollTop=h.scrollTop+100),x(u,!0);try{let F=b()!==null;"
+        "F&&(()=>{let K=c().messages?.[c().currentId],L=0;"
+        "while(K&&L<=b())L++,K=K.parentId?c().messages?.[K.parentId]:null;"
+        "return L<=b()})()&&window.__turtleHistoryPager&&"
         "(F=await window.__turtleHistoryPager.loadOlder(v(),c())),"
         "F&&(b(b()+8),c(c(),!0),W(),await dt(),h&&"
         "(h.scrollTop=h.scrollTop+Math.max(0,h.scrollHeight-O)))}finally{x(u,!1)}};"

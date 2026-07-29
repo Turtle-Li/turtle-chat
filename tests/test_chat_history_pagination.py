@@ -40,6 +40,9 @@ def test_exact_chat_reads_are_rerouted_to_the_paged_history_api():
     patcher = (BRANDING / "patch_open_webui.py").read_text(encoding="utf-8")
     assert "const loadMoreMessages = async () =>" in patcher
     assert "window.__turtleHistoryPager.loadOlder(v(),c())" in patcher
+    assert "c().turtlePage?.hasMore&&" not in patcher
+    assert "while(K&&L<=b())" in patcher
+    assert "return L<=b()" in patcher
     assert "sync_chat_history_index" in patcher
 
 
