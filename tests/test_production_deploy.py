@@ -14,7 +14,9 @@ def test_public_workflow_builds_commit_images_without_deployment_secrets() -> No
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "packages: write" in workflow
-    assert "docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8" in workflow
+    assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in workflow
+    assert "docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c" in workflow
+    assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in workflow
     assert "platforms: linux/amd64" in workflow
     assert "ghcr.io/turtle-li/turtle-chat-gateway" in workflow
     assert "ghcr.io/turtle-li/turtle-chat-open-webui" in workflow
