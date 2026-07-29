@@ -342,6 +342,7 @@ def test_gpt4free_overlay_seals_only_exact_sandbox_zip_downloads() -> None:
     assert "diff --git a/g4f/client/__init__.py b/g4f/client/__init__.py" in overlay
     assert "g4f/client/__init__.py" in LAUNCHER_MODULE.OVERLAY_FILES
     assert "g4f/client/stubs.py" in LAUNCHER_MODULE.OVERLAY_FILES
+    assert "g4f/providers/tool_support.py" in LAUNCHER_MODULE.OVERLAY_FILES
     assert '+        requested_outputs = kwargs.pop("n", 1)' in overlay
     assert (
         '+        repeat_count = requested_outputs if provider_name == "OpenaiAccount" else 1'

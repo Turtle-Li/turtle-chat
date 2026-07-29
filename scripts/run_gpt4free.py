@@ -14,6 +14,7 @@ OVERLAY_FILES = {
     "g4f/Provider/needs_auth/OpenaiChat.py",
     "g4f/Provider/openai/media_pump.py",
     "g4f/providers/base_provider.py",
+    "g4f/providers/tool_support.py",
     "g4f/requests/__init__.py",
     "g4f/client/stubs.py",
     "g4f/tools/run_tools.py",
