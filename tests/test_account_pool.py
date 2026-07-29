@@ -11,6 +11,7 @@ from chatgpt_web_gateway.account_pool import (
     AccountPoolRouter,
     AccountUnavailable,
     MemoryAccountStore,
+    _lane_rate_limit_cooldown_seconds,
     _new_account,
     _now,
 )
@@ -71,6 +72,41 @@ class AccountQuotaProfileTests(unittest.TestCase):
                 "claude-opus-4-8:extended",
                 "claude",
             )["enabled"]
+        )
+
+    def test_dynamic_recovery_backoff_cannot_skip_the_published_window(self) -> None:
+        account = {"provider": "gpt", "quota_profile": "free"}
+
+        self.assertEqual(
+            _lane_rate_limit_cooldown_seconds(
+                account,
+                "gpt-5-5:instant",
+                failures=5,
+                cooldown_seconds=30,
+                elapsed_seconds=225 * 60,
+            ),
+            75 * 60,
+        )
+        self.assertEqual(
+            _lane_rate_limit_cooldown_seconds(
+                account,
+                "gpt-5-5:instant",
+                failures=6,
+                cooldown_seconds=30,
+                elapsed_seconds=5 * 60 * 60,
+            ),
+            30 * 60,
+        )
+        self.assertEqual(
+            _lane_rate_limit_cooldown_seconds(
+                account,
+                "gpt-5-5:instant",
+                failures=2,
+                cooldown_seconds=30,
+                elapsed_seconds=15 * 60,
+                retry_after_seconds=4 * 60 * 60,
+            ),
+            4 * 60 * 60,
         )
 
 
@@ -440,6 +476,119 @@ class AccountPoolRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(overflow.account.id, "acct-a")
         await overflow.release(outcome="success", status_code=200)
         await busy_plus.release(outcome="success", status_code=200)
+
+    async def test_new_chats_elastically_spill_before_the_narrow_account_hard_cap(
+        self,
+    ) -> None:
+        current = self.store.accounts["acct-a"]
+        await self.router.update_account(
+            "acct-a",
+            name=current["name"],
+            worker_endpoint=current["worker_endpoint"],
+            health_path=current["health_path"],
+            max_concurrency=8,
+            priority=100,
+            enabled=True,
+            quota_profile="pro-20x",
+        )
+        plus = await self.add_ready_account(
+            "Plus",
+            worker_port=8321,
+            quota_profile="plus",
+        )
+        await self.router.update_account(
+            plus["id"],
+            name=plus["name"],
+            worker_endpoint=plus["worker_endpoint"],
+            health_path=plus["health_path"],
+            max_concurrency=6,
+            priority=plus["priority"],
+            enabled=True,
+            quota_profile="plus",
+        )
+
+        leases = []
+        for index in range(5):
+            lease = await self.router.acquire(
+                pool_id="gpt-default",
+                request_id=f"request-elastic-plus-{index}",
+                user_id=f"user-{index}",
+                chat_id=f"chat-elastic-plus-{index}",
+                selection_key="latest:medium",
+            )
+            self.assertEqual(lease.account.id, plus["id"])
+            leases.append(lease)
+
+        overflow = await self.router.acquire(
+            pool_id="gpt-default",
+            request_id="request-elastic-overflow",
+            user_id="user-overflow",
+            chat_id="chat-elastic-overflow",
+            selection_key="latest:medium",
+        )
+        self.assertEqual(overflow.account.id, "acct-a")
+
+        await overflow.release(outcome="success", status_code=200)
+        for lease in leases:
+            await lease.release(outcome="success", status_code=200)
+
+    async def test_sticky_chat_spills_when_its_account_reaches_the_hard_cap(
+        self,
+    ) -> None:
+        current = self.store.accounts["acct-a"]
+        await self.router.update_account(
+            "acct-a",
+            name=current["name"],
+            worker_endpoint=current["worker_endpoint"],
+            health_path=current["health_path"],
+            max_concurrency=2,
+            priority=100,
+            enabled=True,
+            quota_profile="pro-20x",
+        )
+        plus = await self.add_ready_account(
+            "Plus",
+            worker_port=8321,
+            quota_profile="plus",
+        )
+
+        first = await self.router.acquire(
+            pool_id="gpt-default",
+            request_id="request-sticky-overflow-seed",
+            user_id="user-sticky",
+            chat_id="chat-sticky-overflow",
+            selection_key="latest:medium",
+        )
+        self.assertEqual(first.account.id, plus["id"])
+        await first.release(outcome="success", status_code=200)
+
+        occupied = await self.router.acquire(
+            pool_id="gpt-default",
+            request_id="request-sticky-overflow-occupied",
+            user_id="user-other",
+            chat_id="chat-sticky-overflow-other",
+            selection_key="latest:medium",
+        )
+        self.assertEqual(occupied.account.id, plus["id"])
+
+        spilled = await self.router.acquire(
+            pool_id="gpt-default",
+            request_id="request-sticky-overflow-spilled",
+            user_id="user-sticky",
+            chat_id="chat-sticky-overflow",
+            selection_key="latest:medium",
+        )
+        self.assertEqual(spilled.account.id, "acct-a")
+        affinity = self.store.affinity[
+            ("gpt-default", "chat-sticky-overflow")
+        ]
+        self.assertEqual(
+            affinity["last_migration_reason"],
+            "concurrency_overflow",
+        )
+
+        await spilled.release(outcome="success", status_code=200)
+        await occupied.release(outcome="success", status_code=200)
 
     async def test_equal_capability_profiles_preserve_the_larger_budget_for_overflow(self) -> None:
         current = self.store.accounts["acct-a"]

@@ -1537,6 +1537,98 @@ def test_account_pool_retries_rate_limit_on_a_distinct_account() -> None:
     assert affinity["last_migration_reason"] == "failover_rate_limit"
 
 
+def test_stream_empty_result_fails_over_before_any_client_content() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(str(request.url.host))
+        if request.url.host == "upstream.test":
+            role_only = {
+                "id": "chatcmpl-empty",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "auto",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant"},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=(
+                    f"data: {json.dumps(role_only)}\n\n"
+                    "data: [DONE]\n\n"
+                ),
+            )
+        answer = {
+            "id": "chatcmpl-backup",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "auto",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "backup stream answer"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=f"data: {json.dumps(answer)}\n\ndata: [DONE]\n\n",
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        add_memory_backup_account(client)
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers=headers(),
+            json={
+                "model": "gpt-5-web",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+                "turtle_request_id": "request-empty-stream-failover",
+                "turtle_user_id": "user-a",
+                "turtle_chat_id": "chat-empty-stream-failover",
+            },
+        ) as response:
+            lines = [line for line in response.iter_lines() if line]
+        store = client.app.state.account_pool.store
+        affinity = store.affinity[
+            ("gpt-default", "chat-empty-stream-failover")
+        ]
+        primary_lease = store.leases[
+            "request-empty-stream-failover"
+        ]
+
+    assert response.status_code == 200
+    assert hosts == ["upstream.test", "backup.test"]
+    assert lines[-1] == "data: [DONE]"
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in lines[:-1]
+    ]
+    assert "".join(
+        event["choices"][0]["delta"].get("content", "")
+        for event in events
+    ) == "backup stream answer"
+    assert primary_lease["outcome"] == "error"
+    assert primary_lease["error_class"] == "upstream_empty_stream"
+    assert affinity["preferred_account_id"] == "backup-account"
+    assert affinity["last_migration_reason"] == "failover_empty_stream"
+
+
 def test_account_pool_retries_explicit_limit_wrapped_as_upstream_500() -> None:
     hosts: list[str] = []
 

@@ -130,6 +130,7 @@ class AccountLease:
         outcome: str,
         status_code: int | None = None,
         error_class: str | None = None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         if self.released:
             return
@@ -146,6 +147,7 @@ class AccountLease:
             outcome=outcome,
             status_code=status_code,
             error_class=error_class,
+            retry_after_seconds=retry_after_seconds,
         )
 
 
@@ -181,6 +183,7 @@ class AccountStore(Protocol):
         status_code: int | None,
         error_class: str | None,
         cooldown_seconds: int,
+        retry_after_seconds: int | None = None,
     ) -> None: ...
 
     def renew(
@@ -296,8 +299,14 @@ def _lane_rate_limit_cooldown_seconds(
     *,
     failures: int,
     cooldown_seconds: int,
+    elapsed_seconds: int = 0,
+    retry_after_seconds: int | None = None,
 ) -> int:
     """Back off dynamic upstream limits without using users as frequent probes."""
+    if retry_after_seconds is not None:
+        # Trust only the already-sanitized numeric hint and keep a hard bound
+        # against malformed or unexpectedly distant upstream values.
+        return min(24 * 60 * 60, max(60, int(retry_after_seconds)))
     lane = quota_lane(
         account.get("quota_profile"),
         selection_key,
@@ -306,15 +315,32 @@ def _lane_rate_limit_cooldown_seconds(
     if lane.get("source") in {"official_dynamic", "official_multiplier"}:
         published_window = max(
             15 * 60,
-            int(lane.get("published_window_seconds") or 60 * 60),
+            int(lane.get("published_window_seconds") or 5 * 60 * 60),
         )
         cap = min(5 * 60 * 60, published_window)
         exponential = 15 * 60 * (2 ** min(max(0, failures - 1), 5))
-        return min(cap, max(cooldown_seconds, exponential))
+        remaining_in_window = max(0, cap - max(0, int(elapsed_seconds)))
+        if remaining_in_window:
+            # Do not let exponential backoff jump past the absolute published
+            # reset window measured from the first observed 429.
+            return min(
+                remaining_in_window,
+                max(cooldown_seconds, exponential),
+            )
+        # Dynamic/anti-abuse restrictions can outlive the nominal window.
+        # Once the published boundary has passed, probe every 30 minutes
+        # instead of starting another multi-hour exponential cycle.
+        return 30 * 60
     return min(
         15 * 60,
         max(cooldown_seconds, 15 * (2 ** min(failures, 5))),
     )
+
+
+def _soft_concurrency_limit(account: dict[str, Any]) -> int:
+    """Leave headroom before spilling new work into idle broader accounts."""
+    hard_limit = max(1, int(account.get("max_concurrency") or 1))
+    return max(1, (hard_limit * 3 + 3) // 4)
 
 
 def _rate_limit_recovery_payload(
@@ -382,6 +408,9 @@ def _lane_snapshot(
     *,
     usage: dict[str, int | None],
     blocked_until: int | None,
+    first_rate_limit_at: int | None = None,
+    last_rate_limit_at: int | None = None,
+    consecutive_failures: int = 0,
     now: int,
 ) -> dict[str, Any]:
     provider = str(account.get("provider") or "gpt")
@@ -432,6 +461,20 @@ def _lane_snapshot(
         "safe_remaining_count": safe_remaining,
         "reset_at": reset_at,
         "blocked_until": int(blocked_until) if blocked else None,
+        "first_rate_limit_at": (
+            int(first_rate_limit_at)
+            if first_rate_limit_at is not None
+            else None
+        ),
+        "last_rate_limit_at": (
+            int(last_rate_limit_at)
+            if last_rate_limit_at is not None
+            else None
+        ),
+        "consecutive_rate_limit_failures": max(
+            0,
+            int(consecutive_failures),
+        ),
         "state": state,
         "admission_available": enabled
         and not blocked
@@ -473,6 +516,11 @@ def _account_quota_snapshot(
                 selection_key,
                 usage=usage,
                 blocked_until=block.get("blocked_until"),
+                first_rate_limit_at=block.get("first_rate_limit_at"),
+                last_rate_limit_at=block.get("last_rate_limit_at"),
+                consecutive_failures=int(
+                    block.get("consecutive_failures") or 0
+                ),
                 now=now,
             )
         )
@@ -562,22 +610,36 @@ def _choose_account(
             if int(preferred.get("active") or 0) >= int(
                 preferred.get("max_concurrency") or 1
             ):
-                raise AccountUnavailable("会话绑定账号正忙，请稍后重试")
-            healthier_budget = [
-                item
-                for item in available
-                if item["id"] != preferred["id"]
-                and preferred_lane["state"] == "reserve"
-                and item["selected_lane"]["state"] in {
-                    "available",
-                    "dynamic",
-                    "untracked",
-                }
-            ]
-            if not healthier_budget:
-                return preferred, None
-            migration_reason = "quota_reserve"
-            available = healthier_budget
+                overflow = [
+                    item
+                    for item in available
+                    if item["id"] != preferred["id"]
+                ]
+                if not overflow:
+                    raise AccountUnavailable("会话绑定账号正忙，请稍后重试")
+                # The same-chat active-lease guard has already proved that no
+                # turn is running. Full Turtle history is authoritative, so a
+                # hard-cap spillover can safely rebuild the upstream
+                # conversation on an idle account instead of returning a local
+                # busy error while pool capacity exists.
+                migration_reason = "concurrency_overflow"
+                available = overflow
+            else:
+                healthier_budget = [
+                    item
+                    for item in available
+                    if item["id"] != preferred["id"]
+                    and preferred_lane["state"] == "reserve"
+                    and item["selected_lane"]["state"] in {
+                        "available",
+                        "dynamic",
+                        "untracked",
+                    }
+                ]
+                if not healthier_budget:
+                    return preferred, None
+                migration_reason = "quota_reserve"
+                available = healthier_budget
         else:
             migration_reason = (
                 "quota_disabled"
@@ -598,6 +660,22 @@ def _choose_account(
         if item["selected_lane"]["dispatch_budget_count"] is not None
     ]
     unknown_weight = max(1, min(known_budgets, default=1))
+    preferred_class = min(
+        (
+            _routing_capability_width(item),
+            _routing_plan_rank(item),
+        )
+        for item in available
+    )
+    preferred_class_has_headroom = any(
+        (
+            _routing_capability_width(item),
+            _routing_plan_rank(item),
+        )
+        == preferred_class
+        and int(item.get("active") or 0) < _soft_concurrency_limit(item)
+        for item in available
+    )
 
     def rank(item: dict[str, Any]) -> tuple[Any, ...]:
         lane = item["selected_lane"]
@@ -605,8 +683,28 @@ def _choose_account(
         dispatch_budget = lane.get("dispatch_budget_count")
         if pressure is None:
             pressure = (int(lane["used_count"]) + int(lane["active_count"])) / unknown_weight
+        account_class = (
+            _routing_capability_width(item),
+            _routing_plan_rank(item),
+        )
+        elastic_overflow_rank = (
+            0
+            if preferred_class_has_headroom or account_class == preferred_class
+            else (
+                0
+                if int(item.get("active") or 0) < _soft_concurrency_limit(item)
+                else 1
+            )
+        )
         return (
             1 if lane["state"] == "reserve" else 0,
+            elastic_overflow_rank,
+            (
+                0
+                if preferred_class_has_headroom
+                else int(item.get("active") or 0)
+                / max(1, int(item.get("max_concurrency") or 1))
+            ),
             _routing_capability_width(item),
             _routing_plan_rank(item),
             int(dispatch_budget) if dispatch_budget is not None else 2**63 - 1,
@@ -922,6 +1020,7 @@ class MemoryAccountStore:
         status_code: int | None,
         error_class: str | None,
         cooldown_seconds: int,
+        retry_after_seconds: int | None = None,
     ) -> None:
         with self._lock:
             now = _now()
@@ -948,6 +1047,11 @@ class MemoryAccountStore:
                 block_key = (account_id, selection_key)
                 previous = self.lane_blocks.get(block_key) or {}
                 failures = int(previous.get("consecutive_failures") or 0) + 1
+                first_rate_limit_at = int(
+                    previous.get("first_rate_limit_at")
+                    or previous.get("last_rate_limit_at")
+                    or now
+                )
                 self.lane_blocks[block_key] = {
                     "account_id": account_id,
                     "selection_key": selection_key,
@@ -957,7 +1061,10 @@ class MemoryAccountStore:
                         selection_key,
                         failures=failures,
                         cooldown_seconds=cooldown_seconds,
+                        elapsed_seconds=now - first_rate_limit_at,
+                        retry_after_seconds=retry_after_seconds,
                     ),
+                    "first_rate_limit_at": first_rate_limit_at,
                     "last_rate_limit_at": now,
                     "consecutive_failures": failures,
                 }
@@ -1550,11 +1657,45 @@ class PostgresAccountStore:
                 account_id TEXT NOT NULL REFERENCES chat_account(id) ON DELETE CASCADE,
                 selection_key TEXT NOT NULL,
                 blocked_until BIGINT,
+                first_rate_limit_at BIGINT,
                 last_rate_limit_at BIGINT,
                 consecutive_failures INTEGER NOT NULL DEFAULT 0,
                 updated_at BIGINT NOT NULL,
                 PRIMARY KEY (account_id, selection_key)
             )
+            """,
+            """
+            ALTER TABLE chat_account_lane_state
+                ADD COLUMN IF NOT EXISTS first_rate_limit_at BIGINT
+            """,
+            """
+            UPDATE chat_account_lane_state AS state
+               SET first_rate_limit_at = COALESCE(
+                       (
+                           SELECT MIN(failed.completed_at)
+                             FROM chat_account_lease AS failed
+                            WHERE failed.account_id = state.account_id
+                              AND failed.selection_key = state.selection_key
+                              AND failed.completed_at IS NOT NULL
+                              AND failed.error_class IN (
+                                  'failover_rate_limit',
+                                  'rate_limit_recovery'
+                              )
+                              AND failed.completed_at > COALESCE(
+                                  (
+                                      SELECT MAX(succeeded.completed_at)
+                                        FROM chat_account_lease AS succeeded
+                                       WHERE succeeded.account_id = state.account_id
+                                         AND succeeded.selection_key = state.selection_key
+                                         AND succeeded.outcome = 'success'
+                                  ),
+                                  0
+                              )
+                       ),
+                       state.last_rate_limit_at,
+                       state.updated_at
+                   )
+             WHERE state.first_rate_limit_at IS NULL
             """,
             """
             CREATE INDEX IF NOT EXISTS chat_account_schedulable_idx
@@ -2028,6 +2169,7 @@ class PostgresAccountStore:
         status_code: int | None,
         error_class: str | None,
         cooldown_seconds: int,
+        retry_after_seconds: int | None = None,
     ) -> None:
         now = _now()
         with self._connect() as connection:
@@ -2076,7 +2218,8 @@ class PostgresAccountStore:
                     account_for_cooldown = dict(account_row) if account_row else {}
                     cursor.execute(
                         """
-                        SELECT consecutive_failures
+                        SELECT consecutive_failures, first_rate_limit_at,
+                               last_rate_limit_at
                           FROM chat_account_lane_state
                          WHERE account_id = %s AND selection_key = %s
                          FOR UPDATE
@@ -2085,20 +2228,29 @@ class PostgresAccountStore:
                     )
                     previous = cursor.fetchone()
                     failures = int(previous["consecutive_failures"] or 0) + 1 if previous else 1
+                    first_rate_limit_at = int(
+                        (previous or {}).get("first_rate_limit_at")
+                        or (previous or {}).get("last_rate_limit_at")
+                        or now
+                    )
                     blocked_until = now + _lane_rate_limit_cooldown_seconds(
                         account_for_cooldown,
                         selection_key,
                         failures=failures,
                         cooldown_seconds=cooldown_seconds,
+                        elapsed_seconds=now - first_rate_limit_at,
+                        retry_after_seconds=retry_after_seconds,
                     )
                     cursor.execute(
                         """
                         INSERT INTO chat_account_lane_state
                             (account_id, selection_key, blocked_until,
+                             first_rate_limit_at,
                              last_rate_limit_at, consecutive_failures, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT(account_id, selection_key) DO UPDATE SET
                             blocked_until = excluded.blocked_until,
+                            first_rate_limit_at = excluded.first_rate_limit_at,
                             last_rate_limit_at = excluded.last_rate_limit_at,
                             consecutive_failures = excluded.consecutive_failures,
                             updated_at = excluded.updated_at
@@ -2107,6 +2259,7 @@ class PostgresAccountStore:
                             account_id,
                             selection_key,
                             blocked_until,
+                            first_rate_limit_at,
                             now,
                             failures,
                             now,
@@ -2762,6 +2915,7 @@ class AccountPoolRouter:
     ) -> None:
         started = time.monotonic()
         status_code: int | None = None
+        retry_after_seconds: int | None = None
         outcome = "error"
         error_class = "rate_limit_recovery"
         account = await asyncio.to_thread(self.store.account, claim.account_id)
@@ -2820,6 +2974,7 @@ class AccountPoolRouter:
             raise
         except UpstreamFailure as exc:
             status_code = exc.status_code
+            retry_after_seconds = exc.retry_after_seconds
         except Exception:
             status_code = 502
         await asyncio.to_thread(
@@ -2830,6 +2985,7 @@ class AccountPoolRouter:
             status_code=status_code,
             error_class=error_class,
             cooldown_seconds=self.cooldown_seconds,
+            retry_after_seconds=retry_after_seconds,
         )
         logger.info(
             "account_recovery_probe account=%s lane=%s recovered=%s status=%s latency_ms=%d",
@@ -2909,6 +3065,7 @@ class AccountPoolRouter:
         outcome: str,
         status_code: int | None,
         error_class: str | None,
+        retry_after_seconds: int | None = None,
     ) -> None:
         await asyncio.to_thread(
             self.store.release,
@@ -2918,6 +3075,7 @@ class AccountPoolRouter:
             status_code=status_code,
             error_class=error_class,
             cooldown_seconds=self.cooldown_seconds,
+            retry_after_seconds=retry_after_seconds,
         )
 
     async def snapshot(self) -> dict[str, Any]:

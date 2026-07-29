@@ -308,6 +308,79 @@ class PostgresAccountStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(AccountPoolConflict, "仍有账号"):
             self.store.delete_pool(occupied["id"])
 
+    def test_rate_limit_hint_and_first_observation_are_persisted(self) -> None:
+        account = self.store.acquire(
+            pool_id="gpt-default",
+            request_id="request-postgres-rate-limit-hint",
+            user_id="user-a",
+            chat_id="chat-rate-limit-hint",
+            lease_seconds=60,
+            selection_key="latest:medium",
+        )
+        before = _now()
+        self.store.release(
+            "request-postgres-rate-limit-hint",
+            account.id,
+            outcome="error",
+            status_code=429,
+            error_class="failover_rate_limit",
+            cooldown_seconds=30,
+            retry_after_seconds=2 * 60 * 60,
+        )
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT first_rate_limit_at, last_rate_limit_at, blocked_until
+                  FROM chat_account_lane_state
+                 WHERE account_id = %s AND selection_key = %s
+                """,
+                (account.id, "latest:medium"),
+            )
+            first = cursor.fetchone()
+            self.assertIsNotNone(first)
+            self.assertGreaterEqual(first["first_rate_limit_at"], before)
+            self.assertGreaterEqual(first["blocked_until"] - _now(), 2 * 60 * 60 - 2)
+            cursor.execute(
+                """
+                UPDATE chat_account_lane_state
+                   SET blocked_until = %s
+                 WHERE account_id = %s AND selection_key = %s
+                """,
+                (_now() - 1, account.id, "latest:medium"),
+            )
+            connection.commit()
+
+        recovery = self.store.claim_rate_limit_recoveries(
+            limit=1,
+            claim_seconds=60,
+        )[0]
+        self.store.release(
+            recovery.request_id,
+            recovery.account_id,
+            outcome="error",
+            status_code=429,
+            error_class="rate_limit_recovery",
+            cooldown_seconds=30,
+        )
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT first_rate_limit_at, last_rate_limit_at
+                  FROM chat_account_lane_state
+                 WHERE account_id = %s AND selection_key = %s
+                """,
+                (account.id, "latest:medium"),
+            )
+            second = cursor.fetchone()
+        self.assertEqual(
+            second["first_rate_limit_at"],
+            first["first_rate_limit_at"],
+        )
+        self.assertGreaterEqual(
+            second["last_rate_limit_at"],
+            first["last_rate_limit_at"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

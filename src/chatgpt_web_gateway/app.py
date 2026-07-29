@@ -396,6 +396,39 @@ def _rewrite_nonstream(payload: dict[str, Any], public_model: str) -> dict[str, 
     return normalized
 
 
+def _has_effective_stream_value(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_has_effective_stream_value(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    for key in (
+        "content",
+        "text",
+        "output_text",
+        "tool_calls",
+        "function_call",
+        "image_url",
+    ):
+        if key in value and _has_effective_stream_value(value[key]):
+            return True
+    for key in ("choices", "message", "delta", "output"):
+        if key in value and _has_effective_stream_value(value[key]):
+            return True
+    return False
+
+
+def _sse_data_has_effective_content(data: str) -> bool:
+    if data == "[DONE]":
+        return False
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return False
+    return _has_effective_stream_value(payload)
+
+
 def _mock_nonstream(body: ChatCompletionRequest, settings: Settings) -> dict[str, Any]:
     answer = mock_answer(body.messages)
     return {
@@ -1599,8 +1632,12 @@ def create_app(
         account_lease = None
         upstream = None
         upstream_response = None
+        upstream_prefetched: list[str] = []
+        upstream_iterator: AsyncIterator[str] | None = None
 
         for attempt_no in range(1, resolved.account_failover_max_attempts + 1):
+            upstream_prefetched = []
+            upstream_iterator = None
             try:
                 account_lease = await request.app.state.account_pool.acquire(
                     pool_id=account_pool_id,
@@ -1720,6 +1757,7 @@ def create_app(
                         outcome="error",
                         status_code=exc.status_code,
                         error_class=failover_reason or "upstream_request",
+                        retry_after_seconds=exc.retry_after_seconds,
                     )
                     if failover_reason is not None:
                         last_safe_failure = (exc.status_code, exc.message)
@@ -1816,6 +1854,7 @@ def create_app(
                     outcome="error",
                     status_code=exc.status_code,
                     error_class=failover_reason or "upstream_connect",
+                    retry_after_seconds=exc.retry_after_seconds,
                 )
                 if failover_reason is not None:
                     last_safe_failure = (exc.status_code, exc.message)
@@ -1858,6 +1897,77 @@ def create_app(
                     status_code=502,
                 )
                 return _error(502, "上游连接失败", "upstream_error")
+
+            candidate_iterator = upstream.stream_data(upstream_response)
+            terminal_without_content = False
+            try:
+                prefetched_bytes = 0
+                for _ in range(256):
+                    try:
+                        data = await anext(candidate_iterator)
+                    except StopAsyncIteration:
+                        terminal_without_content = True
+                        break
+                    upstream_prefetched.append(data)
+                    prefetched_bytes += len(data.encode("utf-8", errors="ignore"))
+                    if _sse_data_has_effective_content(data):
+                        break
+                    if data == "[DONE]":
+                        terminal_without_content = True
+                        break
+                    if prefetched_bytes >= 1024 * 1024:
+                        break
+            except asyncio.CancelledError:
+                await account_lease.release(
+                    outcome="cancelled",
+                    status_code=499,
+                    error_class="client_cancelled",
+                )
+                with contextlib.suppress(Exception):
+                    await upstream_response.aclose()
+                raise
+            except UpstreamFailure as exc:
+                await account_lease.release(
+                    outcome="error",
+                    status_code=exc.status_code,
+                    error_class="upstream_prefetch",
+                    retry_after_seconds=exc.retry_after_seconds,
+                )
+                with contextlib.suppress(Exception):
+                    await upstream_response.aclose()
+                logger.warning(
+                    "request_failed id=%s status=%s reason=upstream_prefetch",
+                    request_id,
+                    exc.status_code,
+                )
+                await record_project_usage(
+                    provider=provider,
+                    route=selection_key,
+                    outcome="error",
+                    status_code=exc.status_code,
+                )
+                return _error(exc.status_code, exc.message, "upstream_error")
+
+            if terminal_without_content:
+                await account_lease.release(
+                    outcome="error",
+                    status_code=502,
+                    error_class="upstream_empty_stream",
+                )
+                with contextlib.suppress(Exception):
+                    await upstream_response.aclose()
+                last_safe_failure = (502, "上游返回空结果")
+                migration_reason_hint = "failover_empty_stream"
+                logger.warning(
+                    "request_failover id=%s attempt=%d account=%s reason=empty_stream status=502",
+                    request_id,
+                    attempt_no,
+                    account_lease.account.id,
+                )
+                upstream_response = None
+                continue
+
+            upstream_iterator = candidate_iterator
             break
         else:
             if last_safe_failure is not None:
@@ -1884,7 +1994,12 @@ def create_app(
             )
             return _error(503, "当前账号组没有可调度账号", "account_pool_unavailable")
 
-        if account_lease is None or upstream is None or upstream_response is None:
+        if (
+            account_lease is None
+            or upstream is None
+            or upstream_response is None
+            or upstream_iterator is None
+        ):
             await record_project_usage(
                 provider=provider,
                 route=selection_key,
@@ -1895,7 +2010,8 @@ def create_app(
             return _error(502, "上游连接失败", "upstream_error")
 
         async def relay() -> AsyncIterator[bytes]:
-            first_data = True
+            first_effective_data = True
+            saw_effective_content = False
             sent_done = False
             stream_error: UpstreamFailure | None = None
             stream_cancelled = False
@@ -1907,6 +2023,13 @@ def create_app(
             tracked_stage_metrics = UpstreamStageMetrics()
             reported_usage_payload: dict[str, Any] | None = None
             estimated_stream_completion_tokens = 0
+
+            async def source_data() -> AsyncIterator[str]:
+                for item in upstream_prefetched:
+                    yield item
+                assert upstream_iterator is not None
+                async for item in upstream_iterator:
+                    yield item
 
             async def finalize(
                 *,
@@ -1977,7 +2100,7 @@ def create_app(
                         and _payload_has_search_intent(payload)
                     )
                 )
-                async for data in upstream.stream_data(upstream_response):
+                async for data in source_data():
                     if provider == "gpt":
                         metadata = extract_upstream_resource_metadata(data)
                         current_media_metrics = extract_upstream_media_metrics(data)
@@ -1996,13 +2119,6 @@ def create_app(
                         tracked_generated_asset_ids.update(
                             metadata.generated_asset_ids
                         )
-                    if first_data:
-                        first_data = False
-                        logger.info(
-                            "request_first_chunk id=%s ttft_ms=%d",
-                            request_id,
-                            int((time.monotonic() - started) * 1000),
-                        )
                     upstream_events = normalize_sse_events(
                         data,
                         public_model,
@@ -2015,6 +2131,18 @@ def create_app(
                         for presented in presentation.feed(upstream_event)
                     ]
                     for event_index, normalized in enumerate(normalized_events):
+                        event_has_effective_content = (
+                            _sse_data_has_effective_content(normalized)
+                        )
+                        if event_has_effective_content:
+                            saw_effective_content = True
+                            if first_effective_data:
+                                first_effective_data = False
+                                logger.info(
+                                    "request_first_chunk id=%s ttft_ms=%d",
+                                    request_id,
+                                    int((time.monotonic() - started) * 1000),
+                                )
                         if normalized != "[DONE]":
                             try:
                                 normalized_payload = json.loads(normalized)
@@ -2048,11 +2176,34 @@ def create_app(
                                 )
                         if normalized == "[DONE]":
                             sent_done = True
-                            await finalize(
-                                outcome="success",
-                                status_code=200,
-                                error_class=None,
-                            )
+                            if saw_effective_content:
+                                await finalize(
+                                    outcome="success",
+                                    status_code=200,
+                                    error_class=None,
+                                )
+                            else:
+                                await finalize(
+                                    outcome="error",
+                                    status_code=502,
+                                    error_class="upstream_empty_stream",
+                                )
+                                error_payload = {
+                                    "error": {
+                                        "message": "上游返回空结果",
+                                        "type": "upstream_stream_error",
+                                        "code": None,
+                                    }
+                                }
+                                yield (
+                                    "data: "
+                                    + json.dumps(
+                                        error_payload,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    )
+                                    + "\n\n"
+                                ).encode()
                             with contextlib.suppress(Exception):
                                 await upstream_response.aclose()
                         yield f"data: {normalized}\n\n".encode()
@@ -2064,11 +2215,34 @@ def create_app(
                         ):
                             await asyncio.sleep(resolved.stream_chunk_delay_ms / 1000)
                 if not sent_done:
-                    await finalize(
-                        outcome="success",
-                        status_code=200,
-                        error_class=None,
-                    )
+                    if saw_effective_content:
+                        await finalize(
+                            outcome="success",
+                            status_code=200,
+                            error_class=None,
+                        )
+                    else:
+                        await finalize(
+                            outcome="error",
+                            status_code=502,
+                            error_class="upstream_empty_stream",
+                        )
+                        error_payload = {
+                            "error": {
+                                "message": "上游返回空结果",
+                                "type": "upstream_stream_error",
+                                "code": None,
+                            }
+                        }
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                error_payload,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                            + "\n\n"
+                        ).encode()
                     yield b"data: [DONE]\n\n"
             except (asyncio.CancelledError, GeneratorExit):
                 stream_cancelled = True
@@ -2093,7 +2267,7 @@ def create_app(
                                 "cancelled"
                                 if stream_cancelled
                                 else "error"
-                                if stream_error
+                                if stream_error or not saw_effective_content
                                 else "success"
                             ),
                             status_code=(
@@ -2101,6 +2275,8 @@ def create_app(
                                 if stream_cancelled
                                 else stream_error.status_code
                                 if stream_error
+                                else 502
+                                if not saw_effective_content
                                 else 200
                             ),
                             error_class=(
@@ -2108,6 +2284,8 @@ def create_app(
                                 if stream_cancelled
                                 else "upstream_stream"
                                 if stream_error
+                                else "upstream_empty_stream"
+                                if not saw_effective_content
                                 else None
                             ),
                         )

@@ -6,6 +6,7 @@ import time
 import unicodedata
 from copy import deepcopy
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from typing import Any, AsyncIterator
 
 import httpx
@@ -17,6 +18,7 @@ from .security import redact
 class UpstreamFailure(Exception):
     status_code: int
     message: str
+    retry_after_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +125,10 @@ _PLAIN_PARAGRAPH_CONTINUATION_RE = re.compile(
 )
 _EXPLICIT_UPSTREAM_LIMIT_RE = re.compile(
     r"\byou(?:['’]ve| have) hit your limit\b",
+    re.IGNORECASE,
+)
+_TURTLE_RETRY_AFTER_RE = re.compile(
+    r"\bturtle_retry_after_s=(\d{1,8})\b",
     re.IGNORECASE,
 )
 _VISIBLE_PROGRESS_PREFIX_RE = re.compile(
@@ -556,7 +562,30 @@ class UpstreamClient:
     @staticmethod
     async def _raise_for_status(response: httpx.Response) -> None:
         body = (await response.aread())[:2048].decode("utf-8", errors="replace")
-        message = redact(body)[:500] or f"upstream HTTP {response.status_code}"
+        retry_after_seconds: int | None = None
+        raw_retry_after = response.headers.get("retry-after")
+        if raw_retry_after:
+            value = raw_retry_after.strip()
+            if value.isdigit():
+                retry_after_seconds = int(value)
+            else:
+                try:
+                    retry_after_seconds = max(
+                        0,
+                        int(parsedate_to_datetime(value).timestamp() - time.time()),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        marker = _TURTLE_RETRY_AFTER_RE.search(body)
+        if marker is not None:
+            retry_after_seconds = int(marker.group(1))
+        if retry_after_seconds is not None:
+            retry_after_seconds = min(
+                24 * 60 * 60,
+                max(1, retry_after_seconds),
+            )
+        safe_body = _TURTLE_RETRY_AFTER_RE.sub("", body)
+        message = redact(safe_body)[:500] or f"upstream HTTP {response.status_code}"
         if response.status_code >= 500 and _EXPLICIT_UPSTREAM_LIMIT_RE.search(body):
             # OpenaiAccount currently wraps ChatGPT's explicit pre-output
             # subscription-limit rejection in HTTP 500. Treat only this
@@ -565,7 +594,7 @@ class UpstreamClient:
             status = 429
         else:
             status = response.status_code if 400 <= response.status_code < 500 else 502
-        raise UpstreamFailure(status, message)
+        raise UpstreamFailure(status, message, retry_after_seconds)
 
 
 def _safe_account_display_name(value: Any) -> str | None:

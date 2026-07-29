@@ -1712,7 +1712,7 @@
         ? `近窗成功 ${numberText(lane.used_count)} · 活动 ${numberText(lane.active_count)}`
         : `已用 ${numberText(lane.used_count)} · 预留 ${numberText(lane.active_count)} · 安全可用 ${numberText(lane.safe_remaining_count)}`;
       const recovery = lane.blocked_until
-        ? `冷却至 ${dateTime(lane.blocked_until)}`
+        ? `后台下次复测 ${dateTime(lane.blocked_until)} · 连续 429 ${numberText(lane.consecutive_rate_limit_failures || 1)} 次`
         : lane.reset_at
           ? `最早释放 ${dateTime(lane.reset_at)}`
           : ["official_dynamic", "official_multiplier"].includes(lane.source)

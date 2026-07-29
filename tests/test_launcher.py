@@ -241,6 +241,18 @@ def test_gpt4free_overlay_tracks_image_tasks_before_completion() -> None:
     assert "+            conversation.generated_images = None" in overlay
 
 
+def test_gpt4free_overlay_forwards_only_a_bounded_rate_limit_reset_hint() -> None:
+    overlay = (
+        LAUNCHER_PATH.parents[1]
+        / "patches/gpt4free-openaiaccount-gpt56.patch"
+    ).read_text(encoding="utf-8")
+
+    assert "+async def _rate_limit_error(response: Any) -> RateLimitError:" in overlay
+    assert '+    suffix = f"; turtle_retry_after_s={retry_after}"' in overlay
+    assert "+        return min(24 * 60 * 60, max(1, int(numeric)))" in overlay
+    assert "+                        raise await _rate_limit_error(response)" in overlay
+
+
 def test_gpt4free_overlay_preserves_upstream_thought_summary() -> None:
     overlay = (LAUNCHER_PATH.parents[1] / "patches/gpt4free-openaiaccount-gpt56.patch").read_text(
         encoding="utf-8"

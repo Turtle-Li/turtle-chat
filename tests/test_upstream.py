@@ -7,6 +7,7 @@ import httpx
 
 from chatgpt_web_gateway.upstream import (
     UpstreamClient,
+    UpstreamFailure,
     extract_upstream_media_metrics,
     extract_upstream_resource_metadata,
     extract_upstream_stage_metrics,
@@ -55,6 +56,41 @@ class UpstreamClientTests(unittest.IsolatedAsyncioTestCase):
             await client.close()
 
         self.assertEqual(observed["host"], "worker.test:8320")
+
+    async def test_rate_limit_retry_hint_is_sanitized_and_preserved(self) -> None:
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "7200"},
+                json={
+                    "error": {
+                        "message": (
+                            "ChatGPT account rate limit reached; "
+                            "turtle_retry_after_s=3600"
+                        )
+                    }
+                },
+            )
+
+        client = UpstreamClient(
+            base_url="http://worker.test:8320/v1",
+            health_path=None,
+            api_key="worker-key",
+            timeout_seconds=10,
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            with self.assertRaises(UpstreamFailure) as raised:
+                await client.completion({"model": "test", "messages": []})
+        finally:
+            await client.close()
+
+        self.assertEqual(raised.exception.status_code, 429)
+        self.assertEqual(raised.exception.retry_after_seconds, 3600)
+        self.assertNotIn(
+            "turtle_retry_after_s",
+            raised.exception.message,
+        )
 
     async def test_cleanup_resource_sends_only_one_exact_identifier(self) -> None:
         observed: dict[str, object] = {}
