@@ -423,7 +423,7 @@ def test_gpt4free_overlay_prewarms_homepage_and_reuses_bounded_http_session() ->
     assert "+    _turtle_http_max_clients_per_session: int = 4" in overlay
     assert '+        """Lease one reusable connection-owning session per active chat."""' in overlay
     assert "+                pool = asyncio.LifoQueue(" in overlay
-    assert "+            cookies.clear()" in overlay
+    assert "+            cookies.clear()" not in overlay
     assert "+                        max_clients=cls._turtle_http_max_clients_per_session," in overlay
     assert "+            await cls._discard_persistent_session(session_key, session)" in overlay
     assert "+        async with cls._persistent_session(" in overlay

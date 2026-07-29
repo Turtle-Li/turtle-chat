@@ -70,7 +70,7 @@ def test_openai_account_leases_reusable_sessions_without_concurrent_sharing(
             timeout=360,
             curl_infos=[],
         ) as first:
-            assert first.cookies.clear_count == 1
+            assert first.cookies.clear_count == 0
             async with OpenaiChat._persistent_session(
                 proxy=None,
                 timeout=360,
@@ -90,7 +90,7 @@ def test_openai_account_leases_reusable_sessions_without_concurrent_sharing(
             session.kwargs["max_clients"] == 4
             for session in FakeStreamSession.instances
         )
-        assert first.cookies.clear_count == 2
+        assert first.cookies.clear_count == 0
         assert first.close_count == 0
 
         with pytest.raises(RuntimeError, match="discard this lease"):
@@ -129,3 +129,27 @@ def test_openai_account_recognizes_wrapped_explicit_rate_limits() -> None:
     assert not payload_has_explicit_rate_limit(
         {"error": {"message": "Temporary upstream server error"}}
     )
+
+
+@requires_runtime
+def test_openai_account_normalizes_streamed_quota_errors() -> None:
+    class DummyConversation:
+        p = None
+
+    async def exercise() -> None:
+        with pytest.raises(
+            openai_chat_module.RateLimitError,
+            match="account rate limit reached",
+        ):
+            await anext(
+                OpenaiChat.iter_messages_line(
+                    None,
+                    None,
+                    b'data: {"error":"You have hit your limit. Try again later."}',
+                    DummyConversation(),
+                    None,
+                    None,
+                )
+            )
+
+    asyncio.run(exercise())
