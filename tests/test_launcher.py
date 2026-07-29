@@ -247,7 +247,8 @@ def test_gpt4free_overlay_forwards_only_a_bounded_rate_limit_reset_hint() -> Non
         / "patches/gpt4free-openaiaccount-gpt56.patch"
     ).read_text(encoding="utf-8")
 
-    assert "+async def _rate_limit_error(response: Any) -> RateLimitError:" in overlay
+    assert "+async def _rate_limit_error(" in overlay
+    assert "+    payload: Any = None," in overlay
     assert '+    suffix = f"; turtle_retry_after_s={retry_after}"' in overlay
     assert "+        return min(24 * 60 * 60, max(1, int(numeric)))" in overlay
     assert "+                        raise await _rate_limit_error(response)" in overlay
@@ -416,10 +417,17 @@ def test_gpt4free_overlay_prewarms_homepage_and_reuses_bounded_http_session() ->
     assert "+                    cls._turtle_home_warmed_at = 0.0" in overlay
     assert "+                await cls._warm_home(session, auth_result)" in overlay
     assert "+            await cls._warm_home(session, auth)" in overlay
-    assert "+    _turtle_http_max_clients: int = 32" in overlay
-    assert '+        """Reuse bounded per-account HTTP connections across chat turns."""' in overlay
-    assert "+                max_clients=cls._turtle_http_max_clients," in overlay
+    assert "+    _turtle_http_max_sessions: int = 8" in overlay
+    assert "+    _turtle_http_max_clients_per_session: int = 4" in overlay
+    assert '+        """Lease one reusable connection-owning session per active chat."""' in overlay
+    assert "+                pool = asyncio.LifoQueue(" in overlay
+    assert "+            cookies.clear()" in overlay
+    assert "+                        max_clients=cls._turtle_http_max_clients_per_session," in overlay
+    assert "+            await cls._discard_persistent_session(session_key, session)" in overlay
     assert "+        async with cls._persistent_session(" in overlay
+    assert "+def _payload_has_explicit_rate_limit(" in overlay
+    assert "+                        if _payload_has_explicit_rate_limit(error_payload):" in overlay
+    assert "+                            raise await _rate_limit_error(" in overlay
 
 
 def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() -> None:

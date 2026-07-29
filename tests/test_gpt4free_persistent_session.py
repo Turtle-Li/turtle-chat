@@ -17,9 +17,13 @@ try:
         "g4f.Provider.needs_auth.OpenaiChat"
     )
     OpenaiChat = openai_chat_module.OpenaiChat
+    payload_has_explicit_rate_limit = (
+        openai_chat_module._payload_has_explicit_rate_limit
+    )
 except ModuleNotFoundError as exc:
     openai_chat_module = None
     OpenaiChat = None
+    payload_has_explicit_rate_limit = None
     RUNTIME_IMPORT_ERROR = exc
 
 
@@ -35,48 +39,93 @@ class FakeStreamSession:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.close_count = 0
+        self.cookies = FakeCookies()
         self.instances.append(self)
 
     async def close(self) -> None:
         self.close_count += 1
 
 
+class FakeCookies:
+    def __init__(self) -> None:
+        self.clear_count = 0
+
+    def clear(self) -> None:
+        self.clear_count += 1
+
+
 @requires_runtime
-def test_openai_account_reuses_and_bounds_persistent_http_session(
+def test_openai_account_leases_reusable_sessions_without_concurrent_sharing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(openai_chat_module, "StreamSession", FakeStreamSession)
-    OpenaiChat._turtle_http_session = None
-    OpenaiChat._turtle_http_session_key = None
+    OpenaiChat._turtle_http_session_pools = {}
+    OpenaiChat._turtle_http_session_counts = {}
     OpenaiChat._turtle_http_session_lock = None
     FakeStreamSession.instances.clear()
 
     async def exercise() -> None:
-        first = await OpenaiChat._get_persistent_session(
+        async with OpenaiChat._persistent_session(
             proxy=None,
             timeout=360,
             curl_infos=[],
-        )
-        reused = await OpenaiChat._get_persistent_session(
-            proxy=None,
-            timeout=360,
-            curl_infos=[],
-        )
-        replacement = await OpenaiChat._get_persistent_session(
-            proxy="http://127.0.0.1:17897",
-            timeout=360,
-            curl_infos=[],
-        )
+        ) as first:
+            assert first.cookies.clear_count == 1
+            async with OpenaiChat._persistent_session(
+                proxy=None,
+                timeout=360,
+                curl_infos=[],
+            ) as parallel:
+                assert parallel is not first
 
-        assert reused is first
-        assert replacement is not first
+        async with OpenaiChat._persistent_session(
+            proxy=None,
+            timeout=360,
+            curl_infos=[],
+        ) as reused:
+            assert reused is first
+
         assert len(FakeStreamSession.instances) == 2
-        assert first.close_count == 1
-        assert replacement.kwargs["max_clients"] == 32
+        assert all(
+            session.kwargs["max_clients"] == 4
+            for session in FakeStreamSession.instances
+        )
+        assert first.cookies.clear_count == 2
+        assert first.close_count == 0
 
-        await replacement.close()
+        with pytest.raises(RuntimeError, match="discard this lease"):
+            async with OpenaiChat._persistent_session(
+                proxy="http://127.0.0.1:17897",
+                timeout=360,
+                curl_infos=[],
+            ) as failed:
+                raise RuntimeError("discard this lease")
+
+        assert failed.close_count == 1
+        assert (
+            OpenaiChat._turtle_http_session_counts[
+                ("http://127.0.0.1:17897", 360)
+            ]
+            == 0
+        )
 
     asyncio.run(exercise())
-    OpenaiChat._turtle_http_session = None
-    OpenaiChat._turtle_http_session_key = None
+    OpenaiChat._turtle_http_session_pools = {}
+    OpenaiChat._turtle_http_session_counts = {}
     OpenaiChat._turtle_http_session_lock = None
+
+
+@requires_runtime
+def test_openai_account_recognizes_wrapped_explicit_rate_limits() -> None:
+    assert payload_has_explicit_rate_limit(
+        {"error": {"message": "You've hit your limit. Try again later."}}
+    )
+    assert payload_has_explicit_rate_limit(
+        {"detail": {"code": "rate_limit_exceeded"}}
+    )
+    assert payload_has_explicit_rate_limit(
+        {"error": {"type": "quota_exhausted"}}
+    )
+    assert not payload_has_explicit_rate_limit(
+        {"error": {"message": "Temporary upstream server error"}}
+    )
