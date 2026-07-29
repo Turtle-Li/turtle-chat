@@ -163,7 +163,7 @@ def _log_upstream_media_metrics(
     if metrics.empty:
         return
     logger.info(
-        "request_media id=%s probe=%d transfer=%d bytes=%d cdn_hit=%d cdn_miss=%d fallback=%d retry=%d file_reuse=%d file_upload=%d file_stale=%d wall_ms=%d cache_ms=%d probe_ms=%d create_ms=%d settle_ms=%d transfer_ms=%d confirm_ms=%d parallel=%d/%d",
+        "request_media id=%s probe=%d transfer=%d bytes=%d cdn_hit=%d cdn_miss=%d fallback=%d retry=%d file_reuse=%d file_upload=%d file_stale=%d wall_ms=%d cache_ms=%d probe_ms=%d create_ms=%d settle_ms=%d transfer_ms=%d confirm_ms=%d prepare_parallel=%d/%d transfer_parallel=%d/%d",
         request_id,
         metrics.probe_count,
         metrics.transfer_count,
@@ -182,6 +182,8 @@ def _log_upstream_media_metrics(
         metrics.settle_ms,
         metrics.transfer_ms,
         metrics.confirm_ms,
+        metrics.max_prepare_parallel,
+        metrics.configured_prepare_parallel,
         metrics.max_parallel,
         metrics.configured_parallel,
     )

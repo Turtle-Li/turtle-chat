@@ -57,6 +57,8 @@ class UpstreamMediaMetrics:
     settle_ms: int = 0
     transfer_ms: int = 0
     confirm_ms: int = 0
+    configured_prepare_parallel: int = 0
+    max_prepare_parallel: int = 0
     configured_parallel: int = 0
     max_parallel: int = 0
 
@@ -81,6 +83,8 @@ class UpstreamMediaMetrics:
                 self.settle_ms,
                 self.transfer_ms,
                 self.confirm_ms,
+                self.configured_prepare_parallel,
+                self.max_prepare_parallel,
                 self.configured_parallel,
                 self.max_parallel,
             )
@@ -758,6 +762,11 @@ def extract_upstream_media_metrics(
         settle_ms=counter("settle_ms", 3_600_000),
         transfer_ms=counter("transfer_ms", 3_600_000),
         confirm_ms=counter("confirm_ms", 3_600_000),
+        configured_prepare_parallel=counter(
+            "configured_prepare_parallel",
+            12,
+        ),
+        max_prepare_parallel=counter("max_prepare_parallel", 12),
         configured_parallel=counter("configured_parallel", 4),
         max_parallel=counter("max_parallel", 4),
     )

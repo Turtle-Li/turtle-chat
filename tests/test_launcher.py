@@ -449,11 +449,16 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert '+                        f"{cls.url}/backend-api/files/{cached[\'file_id\']}/download",' in overlay
     assert '+                                metrics["file_cache_hit"] += 1' in overlay
     assert "transfer = await transfer_media(" in overlay
-    assert "+        prepare_semaphore = asyncio.Semaphore(configured_parallel)" in overlay
+    assert (
+        "+        prepare_semaphore = asyncio.Semaphore(configured_prepare_parallel)"
+        in overlay
+    )
     assert "+        transfer_semaphore = asyncio.Semaphore(configured_parallel)" in overlay
     assert "+                release_prepare()" in overlay
     assert "+                async with transfer_slot():" in overlay
     assert "+            results = await asyncio.gather(" in overlay
+    assert '+        "configured_prepare_parallel": 0,' in overlay
+    assert '+        "max_prepare_parallel": 0,' in overlay
     assert '+        "configured_parallel": 0,' in overlay
     assert '+        "max_parallel": 0,' in overlay
     assert '+            conversation.turtle_media_metrics = _new_media_metrics()' in overlay
@@ -472,6 +477,7 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert '+                    and re.fullmatch(r"turtle-v1-[0-9a-f]{64}", config.conversation_id)' in overlay
     assert '+                                "turtle_input_file_cache": turtle_input_file_cache,' in overlay
     assert "+                        self.turtle_input_file_caches.pop(resource_id, None)" in overlay
+    assert "TURTLE_MEDIA_PREPARE_CONCURRENCY" in LAUNCHER_MODULE.ALLOWED_ENV_NAMES
     assert "TURTLE_MEDIA_UPLOAD_CONCURRENCY" in LAUNCHER_MODULE.ALLOWED_ENV_NAMES
 
 

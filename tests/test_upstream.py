@@ -195,6 +195,8 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
                         "settle_ms": 1000,
                         "transfer_ms": 350,
                         "confirm_ms": 90,
+                        "configured_prepare_parallel": 7,
+                        "max_prepare_parallel": 6,
                         "configured_parallel": 3,
                         "max_parallel": 2,
                         "source_url": "must be ignored",
@@ -208,6 +210,8 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
         self.assertEqual(metrics.retry_count, 1)
         self.assertEqual(metrics.file_cache_hit, 1)
         self.assertEqual(metrics.upload_wall_ms, 1420)
+        self.assertEqual(metrics.configured_prepare_parallel, 7)
+        self.assertEqual(metrics.max_prepare_parallel, 6)
         self.assertEqual(metrics.max_parallel, 2)
 
     def test_rejects_invalid_media_counter_versions_and_values(self) -> None:

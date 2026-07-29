@@ -422,7 +422,10 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.dict(
                 os.environ,
-                {"TURTLE_MEDIA_UPLOAD_CONCURRENCY": "2"},
+                {
+                    "TURTLE_MEDIA_PREPARE_CONCURRENCY": "8",
+                    "TURTLE_MEDIA_UPLOAD_CONCURRENCY": "2",
+                },
                 clear=False,
             ),
             patch(
@@ -460,6 +463,14 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["prepared_before_release"], 3)
         self.assertEqual(session.create_count, 3)
         self.assertEqual(session.confirm_count, 3)
+        self.assertEqual(
+            conversation.turtle_media_metrics["configured_prepare_parallel"],
+            3,
+        )
+        self.assertEqual(
+            conversation.turtle_media_metrics["max_prepare_parallel"],
+            3,
+        )
         self.assertEqual(
             conversation.turtle_media_metrics["configured_parallel"],
             2,
