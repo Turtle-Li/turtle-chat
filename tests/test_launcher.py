@@ -456,6 +456,28 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert "TURTLE_MEDIA_UPLOAD_CONCURRENCY" in LAUNCHER_MODULE.ALLOWED_ENV_NAMES
 
 
+def test_gpt4free_overlay_has_versioned_handoff_latency_metrics() -> None:
+    overlay = (
+        LAUNCHER_PATH.parents[1]
+        / "patches/gpt4free-openaiaccount-gpt56.patch"
+    ).read_text(encoding="utf-8")
+
+    assert '+        "v": 2,' in overlay
+    assert '+        "handoff_first_frame_ms": 0,' in overlay
+    assert '+        "handoff_first_item_topic_class": 0,' in overlay
+    assert '+        "handoff_items_conversations": 0,' in overlay
+    assert '+        "provider_first_emitted_string_ms": 0,' in overlay
+    assert (
+        '+                headers["x-turtle-worker-first-chunk-ms"] = str('
+        in overlay
+    )
+    assert "websocket_url" not in "\n".join(
+        line
+        for line in overlay.splitlines()
+        if "turtle_upstream_stage_metrics" in line
+    )
+
+
 def test_gpt4free_overlay_captures_login_without_sending_a_chat() -> None:
     overlay = (LAUNCHER_PATH.parents[1] / "patches/gpt4free-openaiaccount-gpt56.patch").read_text(
         encoding="utf-8"

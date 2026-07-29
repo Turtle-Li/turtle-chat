@@ -21,6 +21,7 @@ from chatgpt_web_gateway.app import (
     _payload_has_search_intent,
     _request_payload,
     _rewrite_nonstream,
+    _sse_data_has_answer_text,
     create_app,
 )
 from chatgpt_web_gateway.config import Settings
@@ -31,6 +32,37 @@ from chatgpt_web_gateway.project_usage import (
     ProjectRequestConflict,
 )
 from chatgpt_web_gateway.upstream import SearchPresentationBuffer, normalize_sse_events
+
+
+def test_answer_text_detection_ignores_control_and_whitespace() -> None:
+    assert not _sse_data_has_answer_text("[DONE]")
+    assert not _sse_data_has_answer_text(
+        json.dumps(
+            {
+                "choices": [
+                    {"delta": {"role": "assistant", "content": " \n"}}
+                ]
+            }
+        )
+    )
+    assert not _sse_data_has_answer_text(
+        json.dumps(
+            {
+                "choices": [
+                    {"delta": {"tool_calls": [{"id": "tool-1"}]}}
+                ]
+            }
+        )
+    )
+    assert _sse_data_has_answer_text(
+        json.dumps(
+            {
+                "choices": [
+                    {"delta": {"content": "你好"}}
+                ]
+            }
+        )
+    )
 
 
 def settings(**overrides) -> Settings:

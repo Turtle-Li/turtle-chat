@@ -194,8 +194,9 @@ def _log_upstream_stage_metrics(
     if metrics.empty:
         return
     logger.info(
-        "request_upstream_stage id=%s home_ms=%d media_ms=%d prepare_ms=%d requirements_ms=%d submit_headers_ms=%d first_event_ms=%d pre_stream_ms=%d",
+        "request_upstream_stage id=%s schema_version=%d home_ms=%d media_ms=%d prepare_ms=%d requirements_ms=%d submit_headers_ms=%d first_event_ms=%d pre_stream_ms=%d provider_first_emitted_string_ms=%d handoff_used=%d handoff_seen_ms=%d handoff_sse_tail_ms=%d handoff_start_ms=%d handoff_endpoint_ms=%d handoff_connect_ms=%d handoff_first_frame_ms=%d handoff_first_item_ms=%d handoff_first_item_topic_class=%d handoff_items_expected=%d handoff_items_conversations=%d handoff_items_unscoped=%d handoff_done_topic_class=%d handoff_total_ms=%d",
         request_id,
+        metrics.schema_version,
         metrics.home_ms,
         metrics.media_ms,
         metrics.prepare_ms,
@@ -203,6 +204,69 @@ def _log_upstream_stage_metrics(
         metrics.submit_headers_ms,
         metrics.first_event_ms,
         metrics.pre_stream_ms,
+        metrics.provider_first_emitted_string_ms,
+        metrics.handoff_used,
+        metrics.handoff_seen_ms,
+        metrics.handoff_sse_tail_ms,
+        metrics.handoff_start_ms,
+        metrics.handoff_endpoint_ms,
+        metrics.handoff_connect_ms,
+        metrics.handoff_first_frame_ms,
+        metrics.handoff_first_item_ms,
+        metrics.handoff_first_item_topic_class,
+        metrics.handoff_items_expected,
+        metrics.handoff_items_conversations,
+        metrics.handoff_items_unscoped,
+        metrics.handoff_done_topic_class,
+        metrics.handoff_total_ms,
+    )
+
+
+def _bounded_millisecond_header(value: str | None) -> int:
+    try:
+        parsed = int(value or "")
+    except (TypeError, ValueError):
+        return 0
+    return parsed if 0 <= parsed <= 3_600_000 else 0
+
+
+def _log_gateway_stage_metrics(
+    request_id: str,
+    *,
+    attempt_no: int,
+    phase: str,
+    outcome: str,
+    pre_acquire_ms: int,
+    account_acquire_ms: int = 0,
+    worker_headers_ms: int = 0,
+    worker_first_chunk_ms: int = 0,
+    gateway_prefetch_ms: int = 0,
+    response_ready_ms: int = 0,
+    prefetched_events: int = 0,
+    prefetched_bytes: int = 0,
+    prefetched_effective: bool = False,
+) -> None:
+    worker_http_overhead_ms = (
+        max(0, worker_headers_ms - worker_first_chunk_ms)
+        if worker_first_chunk_ms
+        else 0
+    )
+    logger.info(
+        "request_gateway_stage id=%s attempt=%d phase=%s outcome=%s pre_acquire_ms=%d account_acquire_ms=%d worker_headers_ms=%d worker_first_chunk_ms=%d worker_http_overhead_ms=%d gateway_prefetch_ms=%d response_ready_ms=%d prefetched_events=%d prefetched_bytes=%d prefetched_effective=%s",
+        request_id,
+        attempt_no,
+        phase,
+        outcome,
+        pre_acquire_ms,
+        account_acquire_ms,
+        worker_headers_ms,
+        worker_first_chunk_ms,
+        worker_http_overhead_ms,
+        gateway_prefetch_ms,
+        response_ready_ms,
+        prefetched_events,
+        prefetched_bytes,
+        prefetched_effective,
     )
 
 
@@ -427,6 +491,26 @@ def _sse_data_has_effective_content(data: str) -> bool:
     except json.JSONDecodeError:
         return False
     return _has_effective_stream_value(payload)
+
+
+def _sse_data_has_answer_text(data: str) -> bool:
+    if data == "[DONE]":
+        return False
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        delta = choice.get("delta") if isinstance(choice, dict) else None
+        content = delta.get("content") if isinstance(delta, dict) else None
+        if isinstance(content, str) and content.strip():
+            return True
+    return False
 
 
 def _mock_nonstream(body: ChatCompletionRequest, settings: Settings) -> dict[str, Any]:
@@ -1638,6 +1722,8 @@ def create_app(
         for attempt_no in range(1, resolved.account_failover_max_attempts + 1):
             upstream_prefetched = []
             upstream_iterator = None
+            pre_acquire_ms = int((time.monotonic() - started) * 1000)
+            account_acquire_started = time.monotonic()
             try:
                 account_lease = await request.app.state.account_pool.acquire(
                     pool_id=account_pool_id,
@@ -1648,7 +1734,23 @@ def create_app(
                     excluded_account_ids=frozenset(attempted_account_ids),
                     migration_reason_hint=migration_reason_hint,
                 )
+                account_acquire_ms = int(
+                    (time.monotonic() - account_acquire_started) * 1000
+                )
             except AccountUnavailable as exc:
+                _log_gateway_stage_metrics(
+                    request_id,
+                    attempt_no=attempt_no,
+                    phase="account_acquire",
+                    outcome="unavailable",
+                    pre_acquire_ms=pre_acquire_ms,
+                    account_acquire_ms=int(
+                        (time.monotonic() - account_acquire_started) * 1000
+                    ),
+                    response_ready_ms=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                )
                 if last_safe_failure is not None:
                     status_code, message = last_safe_failure
                     logger.warning(
@@ -1698,6 +1800,17 @@ def create_app(
                     account_lease.account
                 )
             except asyncio.CancelledError:
+                _log_gateway_stage_metrics(
+                    request_id,
+                    attempt_no=attempt_no,
+                    phase="worker_client",
+                    outcome="cancelled",
+                    pre_acquire_ms=pre_acquire_ms,
+                    account_acquire_ms=account_acquire_ms,
+                    response_ready_ms=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                )
                 await account_lease.release(
                     outcome="cancelled",
                     status_code=499,
@@ -1712,6 +1825,17 @@ def create_app(
                 )
                 raise
             except Exception:
+                _log_gateway_stage_metrics(
+                    request_id,
+                    attempt_no=attempt_no,
+                    phase="worker_client",
+                    outcome="error",
+                    pre_acquire_ms=pre_acquire_ms,
+                    account_acquire_ms=account_acquire_ms,
+                    response_ready_ms=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                )
                 await account_lease.release(
                     outcome="error",
                     status_code=502,
@@ -1833,9 +1957,32 @@ def create_app(
                 )
                 return normalized_result
 
+            upstream_open_started = time.monotonic()
             try:
                 upstream_response = await upstream.open_stream(payload)
+                worker_headers_ms = int(
+                    (time.monotonic() - upstream_open_started) * 1000
+                )
+                worker_first_chunk_ms = _bounded_millisecond_header(
+                    upstream_response.headers.get(
+                        "x-turtle-worker-first-chunk-ms"
+                    )
+                )
             except asyncio.CancelledError:
+                _log_gateway_stage_metrics(
+                    request_id,
+                    attempt_no=attempt_no,
+                    phase="worker_headers",
+                    outcome="cancelled",
+                    pre_acquire_ms=pre_acquire_ms,
+                    account_acquire_ms=account_acquire_ms,
+                    worker_headers_ms=int(
+                        (time.monotonic() - upstream_open_started) * 1000
+                    ),
+                    response_ready_ms=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                )
                 await account_lease.release(
                     outcome="cancelled",
                     status_code=499,
@@ -1849,6 +1996,20 @@ def create_app(
                 )
                 raise
             except UpstreamFailure as exc:
+                _log_gateway_stage_metrics(
+                    request_id,
+                    attempt_no=attempt_no,
+                    phase="worker_headers",
+                    outcome=f"http_{exc.status_code}",
+                    pre_acquire_ms=pre_acquire_ms,
+                    account_acquire_ms=account_acquire_ms,
+                    worker_headers_ms=int(
+                        (time.monotonic() - upstream_open_started) * 1000
+                    ),
+                    response_ready_ms=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                )
                 failover_reason = _safe_failover_reason(exc.status_code)
                 await account_lease.release(
                     outcome="error",
@@ -1881,6 +2042,20 @@ def create_app(
                 )
                 return _error(exc.status_code, exc.message, "upstream_error")
             except Exception:
+                _log_gateway_stage_metrics(
+                    request_id,
+                    attempt_no=attempt_no,
+                    phase="worker_headers",
+                    outcome="error",
+                    pre_acquire_ms=pre_acquire_ms,
+                    account_acquire_ms=account_acquire_ms,
+                    worker_headers_ms=int(
+                        (time.monotonic() - upstream_open_started) * 1000
+                    ),
+                    response_ready_ms=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                )
                 await account_lease.release(
                     outcome="error",
                     status_code=502,
@@ -1900,8 +2075,11 @@ def create_app(
 
             candidate_iterator = upstream.stream_data(upstream_response)
             terminal_without_content = False
+            prefetch_started = time.monotonic()
+            prefetch_outcome = "exception"
+            prefetched_bytes = 0
+            prefetched_effective = False
             try:
-                prefetched_bytes = 0
                 for _ in range(256):
                     try:
                         data = await anext(candidate_iterator)
@@ -1911,13 +2089,22 @@ def create_app(
                     upstream_prefetched.append(data)
                     prefetched_bytes += len(data.encode("utf-8", errors="ignore"))
                     if _sse_data_has_effective_content(data):
+                        prefetched_effective = True
                         break
                     if data == "[DONE]":
                         terminal_without_content = True
                         break
                     if prefetched_bytes >= 1024 * 1024:
                         break
+                prefetch_outcome = (
+                    "empty"
+                    if terminal_without_content
+                    else "effective"
+                    if prefetched_effective
+                    else "limit"
+                )
             except asyncio.CancelledError:
+                prefetch_outcome = "cancelled"
                 await account_lease.release(
                     outcome="cancelled",
                     status_code=499,
@@ -1927,6 +2114,7 @@ def create_app(
                     await upstream_response.aclose()
                 raise
             except UpstreamFailure as exc:
+                prefetch_outcome = f"http_{exc.status_code}"
                 await account_lease.release(
                     outcome="error",
                     status_code=exc.status_code,
@@ -1947,6 +2135,26 @@ def create_app(
                     status_code=exc.status_code,
                 )
                 return _error(exc.status_code, exc.message, "upstream_error")
+            finally:
+                _log_gateway_stage_metrics(
+                    request_id,
+                    attempt_no=attempt_no,
+                    phase="gateway_prefetch",
+                    outcome=prefetch_outcome,
+                    pre_acquire_ms=pre_acquire_ms,
+                    account_acquire_ms=account_acquire_ms,
+                    worker_headers_ms=worker_headers_ms,
+                    worker_first_chunk_ms=worker_first_chunk_ms,
+                    gateway_prefetch_ms=int(
+                        (time.monotonic() - prefetch_started) * 1000
+                    ),
+                    response_ready_ms=int(
+                        (time.monotonic() - started) * 1000
+                    ),
+                    prefetched_events=len(upstream_prefetched),
+                    prefetched_bytes=prefetched_bytes,
+                    prefetched_effective=prefetched_effective,
+                )
 
             if terminal_without_content:
                 await account_lease.release(
@@ -2011,6 +2219,7 @@ def create_app(
 
         async def relay() -> AsyncIterator[bytes]:
             first_effective_data = True
+            first_answer_text = True
             saw_effective_content = False
             sent_done = False
             stream_error: UpstreamFailure | None = None
@@ -2134,6 +2343,9 @@ def create_app(
                         event_has_effective_content = (
                             _sse_data_has_effective_content(normalized)
                         )
+                        event_has_answer_text = _sse_data_has_answer_text(
+                            normalized
+                        )
                         if event_has_effective_content:
                             saw_effective_content = True
                             if first_effective_data:
@@ -2206,6 +2418,16 @@ def create_app(
                                 ).encode()
                             with contextlib.suppress(Exception):
                                 await upstream_response.aclose()
+                        if event_has_answer_text and first_answer_text:
+                            first_answer_text = False
+                            logger.info(
+                                "request_first_answer_text id=%s ttft_ms=%d",
+                                request_id,
+                                int(
+                                    (time.monotonic() - started)
+                                    * 1000
+                                ),
+                            )
                         yield f"data: {normalized}\n\n".encode()
                         if normalized == "[DONE]":
                             return

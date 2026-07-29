@@ -228,7 +228,7 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
             {
                 "conversation": {
                     "turtle_upstream_stage_metrics": {
-                        "v": 1,
+                        "v": 2,
                         "home_ms": 0,
                         "media_ms": 12_300,
                         "prepare_ms": 240,
@@ -236,6 +236,21 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
                         "submit_headers_ms": 90,
                         "first_event_ms": 2_800,
                         "pre_stream_ms": 15_900,
+                        "provider_first_emitted_string_ms": 7_100,
+                        "handoff_used": 1,
+                        "handoff_seen_ms": 2_810,
+                        "handoff_sse_tail_ms": 18,
+                        "handoff_start_ms": 3_100,
+                        "handoff_endpoint_ms": 190,
+                        "handoff_connect_ms": 170,
+                        "handoff_first_frame_ms": 25,
+                        "handoff_first_item_ms": 4_200,
+                        "handoff_first_item_topic_class": 2,
+                        "handoff_items_expected": 0,
+                        "handoff_items_conversations": 4,
+                        "handoff_items_unscoped": 1,
+                        "handoff_done_topic_class": 2,
+                        "handoff_total_ms": 4_580,
                         "source_url": "must be ignored",
                     }
                 }
@@ -243,17 +258,48 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
         )
 
         self.assertEqual(metrics.media_ms, 12_300)
+        self.assertEqual(metrics.schema_version, 2)
         self.assertEqual(metrics.first_event_ms, 2_800)
         self.assertEqual(metrics.pre_stream_ms, 15_900)
+        self.assertEqual(metrics.provider_first_emitted_string_ms, 7_100)
+        self.assertEqual(metrics.handoff_used, 1)
+        self.assertEqual(metrics.handoff_start_ms, 3_100)
+        self.assertEqual(metrics.handoff_endpoint_ms, 190)
+        self.assertEqual(metrics.handoff_connect_ms, 170)
+        self.assertEqual(metrics.handoff_first_frame_ms, 25)
+        self.assertEqual(metrics.handoff_first_item_ms, 4_200)
+        self.assertEqual(metrics.handoff_first_item_topic_class, 2)
+        self.assertEqual(metrics.handoff_items_conversations, 4)
+        self.assertEqual(metrics.handoff_items_unscoped, 1)
+        self.assertEqual(metrics.handoff_done_topic_class, 2)
+        self.assertEqual(metrics.handoff_total_ms, 4_580)
 
         invalid = extract_upstream_stage_metrics(
             {
                 "conversation": {
                     "turtle_upstream_stage_metrics": {
-                        "v": 1,
+                        "v": 2,
                         "pre_stream_ms": 3_600_001,
+                        "handoff_used": 2,
                     }
                 }
             }
         )
         self.assertTrue(invalid.empty)
+
+        legacy = extract_upstream_stage_metrics(
+            {
+                "conversation": {
+                    "turtle_upstream_stage_metrics": {
+                        "v": 1,
+                        "pre_stream_ms": 900,
+                        "handoff_used": 1,
+                        "handoff_total_ms": 500,
+                    }
+                }
+            }
+        )
+        self.assertEqual(legacy.schema_version, 1)
+        self.assertEqual(legacy.pre_stream_ms, 900)
+        self.assertEqual(legacy.handoff_used, 0)
+        self.assertEqual(legacy.handoff_total_ms, 0)

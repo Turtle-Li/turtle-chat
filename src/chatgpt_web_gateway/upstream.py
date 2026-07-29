@@ -89,6 +89,7 @@ class UpstreamMediaMetrics:
 
 @dataclass(frozen=True, slots=True)
 class UpstreamStageMetrics:
+    schema_version: int = 0
     home_ms: int = 0
     media_ms: int = 0
     prepare_ms: int = 0
@@ -96,6 +97,21 @@ class UpstreamStageMetrics:
     submit_headers_ms: int = 0
     first_event_ms: int = 0
     pre_stream_ms: int = 0
+    provider_first_emitted_string_ms: int = 0
+    handoff_used: int = 0
+    handoff_seen_ms: int = 0
+    handoff_sse_tail_ms: int = 0
+    handoff_start_ms: int = 0
+    handoff_endpoint_ms: int = 0
+    handoff_connect_ms: int = 0
+    handoff_first_frame_ms: int = 0
+    handoff_first_item_ms: int = 0
+    handoff_first_item_topic_class: int = 0
+    handoff_items_expected: int = 0
+    handoff_items_conversations: int = 0
+    handoff_items_unscoped: int = 0
+    handoff_done_topic_class: int = 0
+    handoff_total_ms: int = 0
 
     @property
     def empty(self) -> bool:
@@ -108,6 +124,21 @@ class UpstreamStageMetrics:
                 self.submit_headers_ms,
                 self.first_event_ms,
                 self.pre_stream_ms,
+                self.provider_first_emitted_string_ms,
+                self.handoff_used,
+                self.handoff_seen_ms,
+                self.handoff_sse_tail_ms,
+                self.handoff_start_ms,
+                self.handoff_endpoint_ms,
+                self.handoff_connect_ms,
+                self.handoff_first_frame_ms,
+                self.handoff_first_item_ms,
+                self.handoff_first_item_topic_class,
+                self.handoff_items_expected,
+                self.handoff_items_conversations,
+                self.handoff_items_unscoped,
+                self.handoff_done_topic_class,
+                self.handoff_total_ms,
             )
         )
 
@@ -735,8 +766,9 @@ def extract_upstream_stage_metrics(
     if not isinstance(conversation, dict):
         return UpstreamStageMetrics()
     metrics = conversation.get("turtle_upstream_stage_metrics")
-    if not isinstance(metrics, dict) or metrics.get("v") != 1:
+    if not isinstance(metrics, dict) or metrics.get("v") not in {1, 2}:
         return UpstreamStageMetrics()
+    schema_version = int(metrics["v"])
 
     def timing(name: str) -> int:
         candidate = metrics.get(name)
@@ -746,7 +778,23 @@ def extract_upstream_stage_metrics(
             else 0
         )
 
+    def flag(name: str) -> int:
+        return 1 if metrics.get(name) == 1 else 0
+
+    def topic_class(name: str) -> int:
+        candidate = metrics.get(name)
+        return candidate if candidate in {1, 2, 3} else 0
+
+    def counter(name: str) -> int:
+        candidate = metrics.get(name)
+        return (
+            candidate
+            if isinstance(candidate, int) and 0 <= candidate <= 10_000
+            else 0
+        )
+
     return UpstreamStageMetrics(
+        schema_version=schema_version,
         home_ms=timing("home_ms"),
         media_ms=timing("media_ms"),
         prepare_ms=timing("prepare_ms"),
@@ -754,6 +802,61 @@ def extract_upstream_stage_metrics(
         submit_headers_ms=timing("submit_headers_ms"),
         first_event_ms=timing("first_event_ms"),
         pre_stream_ms=timing("pre_stream_ms"),
+        provider_first_emitted_string_ms=(
+            timing("provider_first_emitted_string_ms")
+            if schema_version >= 2
+            else 0
+        ),
+        handoff_used=flag("handoff_used") if schema_version >= 2 else 0,
+        handoff_seen_ms=(
+            timing("handoff_seen_ms") if schema_version >= 2 else 0
+        ),
+        handoff_sse_tail_ms=(
+            timing("handoff_sse_tail_ms") if schema_version >= 2 else 0
+        ),
+        handoff_start_ms=(
+            timing("handoff_start_ms") if schema_version >= 2 else 0
+        ),
+        handoff_endpoint_ms=(
+            timing("handoff_endpoint_ms") if schema_version >= 2 else 0
+        ),
+        handoff_connect_ms=(
+            timing("handoff_connect_ms") if schema_version >= 2 else 0
+        ),
+        handoff_first_frame_ms=(
+            timing("handoff_first_frame_ms") if schema_version >= 2 else 0
+        ),
+        handoff_first_item_ms=(
+            timing("handoff_first_item_ms") if schema_version >= 2 else 0
+        ),
+        handoff_first_item_topic_class=(
+            topic_class("handoff_first_item_topic_class")
+            if schema_version >= 2
+            else 0
+        ),
+        handoff_items_expected=(
+            counter("handoff_items_expected")
+            if schema_version >= 2
+            else 0
+        ),
+        handoff_items_conversations=(
+            counter("handoff_items_conversations")
+            if schema_version >= 2
+            else 0
+        ),
+        handoff_items_unscoped=(
+            counter("handoff_items_unscoped")
+            if schema_version >= 2
+            else 0
+        ),
+        handoff_done_topic_class=(
+            topic_class("handoff_done_topic_class")
+            if schema_version >= 2
+            else 0
+        ),
+        handoff_total_ms=(
+            timing("handoff_total_ms") if schema_version >= 2 else 0
+        ),
     )
 
 
