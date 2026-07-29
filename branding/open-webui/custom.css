@@ -9054,3 +9054,445 @@ html.dark .turtle-announcement-navigation > button {
     padding: 0.85rem 1rem;
   }
 }
+
+/* ChatGPT Web rich references: image groups, entities, URLs and products. */
+.turtle-image-reference-group,
+.turtle-products-reference,
+.turtle-reference-list {
+  width: min(100%, 46rem);
+  margin: 0.9rem 0;
+  overflow: hidden;
+  color: var(--turtle-text);
+  border: 1px solid var(--turtle-line);
+  border-radius: 1rem;
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--turtle-panel-soft) 72%, transparent), transparent 58%),
+    color-mix(in srgb, var(--turtle-panel-strong) 88%, transparent);
+  box-shadow: 0 16px 42px rgba(2, 10, 16, 0.12);
+}
+
+.turtle-image-reference-group > header,
+.turtle-products-reference > header,
+.turtle-reference-list > header {
+  display: flex;
+  min-height: 3.4rem;
+  gap: 0.68rem;
+  align-items: center;
+  padding: 0.68rem 0.78rem 0.58rem;
+}
+
+.turtle-rich-reference-icon {
+  display: inline-grid;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--turtle-cyan);
+  border: 1px solid color-mix(in srgb, var(--turtle-cyan) 22%, transparent);
+  border-radius: 0.62rem;
+  background: color-mix(in srgb, var(--turtle-cyan) 10%, transparent);
+}
+
+.turtle-rich-reference-icon svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.turtle-image-reference-group > header > span:last-child,
+.turtle-products-reference > header > span:last-child,
+.turtle-reference-list > header > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.turtle-image-reference-group > header strong,
+.turtle-products-reference > header strong,
+.turtle-reference-list > header strong {
+  color: inherit;
+  font-size: 0.8rem;
+  font-weight: 680;
+  line-height: 1.35;
+}
+
+.turtle-image-reference-group > header small,
+.turtle-products-reference > header small,
+.turtle-reference-list > header small {
+  margin-top: 0.12rem;
+  overflow: hidden;
+  color: var(--turtle-muted);
+  font-size: 0.67rem;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turtle-image-reference-rail {
+  display: grid;
+  gap: 0.56rem;
+  padding: 0 0.68rem 0.72rem;
+  overflow: auto hidden;
+  grid-auto-columns: minmax(11.5rem, 38%);
+  grid-auto-flow: column;
+  overscroll-behavior-inline: contain;
+  scrollbar-color: color-mix(in srgb, var(--turtle-muted) 34%, transparent) transparent;
+  scrollbar-width: thin;
+  scroll-snap-type: inline proximity;
+}
+
+.turtle-image-reference-group[data-layout="grid"] .turtle-image-reference-rail,
+.turtle-image-reference-group[data-layout="bento"] .turtle-image-reference-rail {
+  overflow: visible;
+  grid-auto-flow: row;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.turtle-image-reference-group[data-layout="bento"] .turtle-image-reference-card:first-child:nth-last-child(n + 3) {
+  grid-row: span 2;
+}
+
+.turtle-image-reference-card {
+  position: relative;
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: #f8fafc !important;
+  text-decoration: none !important;
+  border: 1px solid color-mix(in srgb, var(--turtle-line) 82%, transparent);
+  border-radius: 0.76rem;
+  background: rgba(8, 20, 28, 0.5);
+  scroll-snap-align: start;
+  transition:
+    border-color 140ms ease,
+    transform 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.turtle-image-reference-card:hover,
+.turtle-image-reference-card:focus-visible {
+  border-color: var(--turtle-line-strong);
+  box-shadow: 0 12px 28px rgba(2, 10, 16, 0.2);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.turtle-image-reference-card img {
+  display: block;
+  width: 100%;
+  margin: 0 !important;
+  object-fit: cover;
+  background: color-mix(in srgb, var(--turtle-panel-soft) 64%, transparent);
+  aspect-ratio: var(--turtle-rich-image-ratio, 16 / 9);
+}
+
+.turtle-image-reference-card > span {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  min-height: 2.7rem;
+  flex-direction: column;
+  justify-content: end;
+  padding: 1.25rem 0.58rem 0.48rem;
+  background: linear-gradient(transparent, rgba(2, 8, 14, 0.88));
+}
+
+.turtle-image-reference-card > span strong,
+.turtle-image-reference-card > span small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turtle-image-reference-card > span strong {
+  color: #f8fafc;
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+
+.turtle-image-reference-card > span small {
+  margin-top: 0.1rem;
+  color: #cbd5e1;
+  font-size: 0.58rem;
+}
+
+.turtle-image-reference-empty {
+  margin: 0 0.72rem 0.72rem !important;
+  padding: 0.72rem 0.78rem;
+  color: var(--turtle-muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  border: 1px dashed var(--turtle-line);
+  border-radius: 0.7rem;
+}
+
+.turtle-image-reference-group > footer {
+  display: flex;
+  gap: 0.38rem;
+  align-items: center;
+  padding: 0.58rem 0.72rem 0.68rem;
+  overflow: auto hidden;
+  border-top: 1px solid var(--turtle-line);
+  scrollbar-width: none;
+}
+
+.turtle-image-reference-group > footer > span {
+  flex: 0 0 auto;
+  color: var(--turtle-muted);
+  font-size: 0.64rem;
+}
+
+.turtle-image-reference-group > footer a {
+  display: inline-flex;
+  min-height: 1.65rem;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 0 0.58rem;
+  color: var(--turtle-text) !important;
+  font-size: 0.64rem;
+  font-weight: 590;
+  text-decoration: none !important;
+  border: 1px solid var(--turtle-line);
+  border-radius: 999px;
+  background: var(--turtle-panel-soft);
+}
+
+.turtle-image-reference-group > footer a:hover,
+.turtle-image-reference-group > footer a:focus-visible {
+  border-color: var(--turtle-line-strong);
+  outline: none;
+}
+
+.turtle-entity-reference {
+  display: inline-flex !important;
+  max-width: min(100%, 26rem);
+  min-height: 2.8rem;
+  gap: 0.55rem;
+  align-items: center;
+  margin: 0.28rem 0.18rem 0.28rem 0;
+  padding: 0.4rem 0.62rem 0.4rem 0.46rem;
+  color: var(--turtle-text) !important;
+  vertical-align: middle;
+  text-decoration: none !important;
+  border: 1px solid var(--turtle-line);
+  border-radius: 0.78rem;
+  background: color-mix(in srgb, var(--turtle-panel-soft) 76%, transparent);
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    transform 140ms ease;
+}
+
+.turtle-entity-reference:hover,
+.turtle-entity-reference:focus-visible {
+  border-color: var(--turtle-line-strong);
+  background: color-mix(in srgb, var(--turtle-panel-soft) 94%, transparent);
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.turtle-entity-reference .turtle-rich-reference-icon {
+  width: 1.88rem;
+  height: 1.88rem;
+  border-radius: 0.56rem;
+}
+
+.turtle-entity-reference > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.turtle-entity-reference strong,
+.turtle-entity-reference small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turtle-entity-reference strong {
+  color: inherit;
+  font-size: 0.76rem;
+  font-weight: 670;
+}
+
+.turtle-entity-reference small {
+  margin-top: 0.08rem;
+  color: var(--turtle-muted);
+  font-size: 0.63rem;
+}
+
+.turtle-products-reference > div {
+  display: grid;
+  gap: 0.48rem;
+  padding: 0 0.68rem 0.72rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.turtle-product-reference-card {
+  display: flex;
+  min-width: 0;
+  min-height: 3.1rem;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0.48rem 0.62rem;
+  color: var(--turtle-text) !important;
+  text-decoration: none !important;
+  border: 1px solid var(--turtle-line);
+  border-radius: 0.7rem;
+  background: var(--turtle-panel-soft);
+}
+
+a.turtle-product-reference-card:hover,
+a.turtle-product-reference-card:focus-visible {
+  border-color: var(--turtle-line-strong);
+  outline: none;
+}
+
+.turtle-product-reference-card strong,
+.turtle-product-reference-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turtle-product-reference-card strong {
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.turtle-product-reference-card small {
+  margin-top: 0.12rem;
+  color: var(--turtle-muted);
+  font-size: 0.62rem;
+}
+
+.turtle-reference-list > div {
+  display: grid;
+  gap: 0.42rem;
+  padding: 0 0.68rem 0.72rem;
+}
+
+.turtle-reference-list-card {
+  display: grid;
+  min-width: 0;
+  min-height: 3.15rem;
+  gap: 0.62rem;
+  align-items: center;
+  padding: 0.46rem 0.58rem;
+  color: var(--turtle-text) !important;
+  text-decoration: none !important;
+  border: 1px solid var(--turtle-line);
+  border-radius: 0.7rem;
+  background: var(--turtle-panel-soft);
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.turtle-reference-list-card:not(:has(img)) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+a.turtle-reference-list-card:hover,
+a.turtle-reference-list-card:focus-visible {
+  border-color: var(--turtle-line-strong);
+  outline: none;
+}
+
+.turtle-reference-list-card > img {
+  width: 2.4rem;
+  height: 2.4rem;
+  margin: 0 !important;
+  object-fit: cover;
+  border-radius: 0.48rem;
+  background: color-mix(in srgb, var(--turtle-panel-soft) 68%, transparent);
+}
+
+.turtle-reference-list-card > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.turtle-reference-list-card strong,
+.turtle-reference-list-card small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turtle-reference-list-card strong {
+  font-size: 0.72rem;
+  font-weight: 650;
+}
+
+.turtle-reference-list-card small {
+  margin-top: 0.12rem;
+  color: var(--turtle-muted);
+  font-size: 0.62rem;
+}
+
+.turtle-unsupported-rich-reference {
+  color: var(--turtle-muted) !important;
+  text-decoration: none !important;
+  cursor: default;
+}
+
+html.light .turtle-image-reference-group,
+html.light .turtle-products-reference,
+html.light .turtle-reference-list {
+  color: #0f172a;
+  border-color: rgba(15, 23, 42, 0.12);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+}
+
+html.light .turtle-image-reference-card {
+  border-color: rgba(15, 23, 42, 0.12);
+  background: #e2e8f0;
+}
+
+html.light .turtle-entity-reference,
+html.light .turtle-product-reference-card,
+html.light .turtle-reference-list-card,
+html.light .turtle-image-reference-group > footer a {
+  color: #0f172a !important;
+  border-color: rgba(15, 23, 42, 0.12);
+  background: rgba(248, 250, 252, 0.86);
+}
+
+html.light .turtle-entity-reference:hover,
+html.light .turtle-entity-reference:focus-visible,
+html.light a.turtle-product-reference-card:hover,
+html.light a.turtle-product-reference-card:focus-visible,
+html.light a.turtle-reference-list-card:hover,
+html.light a.turtle-reference-list-card:focus-visible {
+  border-color: rgba(15, 23, 42, 0.24);
+  background: #fff;
+}
+
+@media (max-width: 640px) {
+  .turtle-image-reference-group,
+  .turtle-products-reference,
+  .turtle-reference-list {
+    width: 100%;
+    border-radius: 0.88rem;
+  }
+
+  .turtle-image-reference-rail {
+    grid-auto-columns: minmax(10rem, 76%);
+  }
+
+  .turtle-image-reference-group[data-layout="grid"] .turtle-image-reference-rail,
+  .turtle-image-reference-group[data-layout="bento"] .turtle-image-reference-rail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .turtle-image-reference-group[data-layout="bento"] .turtle-image-reference-card:first-child:nth-last-child(n + 3) {
+    grid-row: auto;
+  }
+
+  .turtle-products-reference > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN" class="dark" data-turtle-provider="gpt">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>富内容引用预览</title>
+    <link rel="stylesheet" href="/branding/open-webui/custom.css" />
+    <style>
+      body {
+        min-height: 100vh;
+        margin: 0;
+        color: var(--turtle-text);
+        font-family: var(--turtle-font);
+        background:
+          radial-gradient(circle at 75% 0%, rgba(34, 211, 238, 0.08), transparent 34rem),
+          var(--turtle-bg);
+      }
+
+      main {
+        width: min(92vw, 52rem);
+        margin: 0 auto;
+        padding: 3rem 0 6rem;
+      }
+
+      .fixture-toolbar {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 2rem;
+      }
+
+      .fixture-toolbar button {
+        padding: 0.45rem 0.8rem;
+        color: inherit;
+        border: 1px solid var(--turtle-line);
+        border-radius: 999px;
+        background: var(--turtle-panel-soft);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="fixture-toolbar">
+        <button type="button" data-theme="dark">深色</button>
+        <button type="button" data-theme="light">浅色</button>
+      </div>
+      <div id="response-content-container">
+        <div>
+          <h2>下午：艺术村</h2>
+          <p>
+            建议去：
+            <a data-rich-kind="entity">Baan Kang Wat</a>
+          </p>
+          <p><a data-rich-kind="image-group">相关图片</a></p>
+          <p><a data-rich-kind="products">商品推荐</a></p>
+          <p><a data-rich-kind="reference-list">相关网页</a></p>
+          <p>
+            普通正文和
+            <a href="https://example.com">普通链接</a>
+            保持原样。
+          </p>
+        </div>
+      </div>
+    </main>
+    <script>
+      (() => {
+        const payloads = {
+          entity: {
+            v: 1,
+            entity_type: "point_of_interest",
+            name: "Baan Kang Wat",
+            description: "Chiang Mai, Thailand",
+            url: "",
+          },
+          "image-group": {
+            v: 1,
+            queries: ["Baan Kang Wat Chiang Mai", "Chiang Mai art village"],
+            layout: "carousel",
+            aspect_ratio: "16:9",
+            images: [
+              {
+                image_url: "https://placehold.co/960x540/183b4d/e8f6fa.png?text=Baan+Kang+Wat",
+                source_url: "https://example.com/baan-kang-wat",
+                title: "Baan Kang Wat",
+                source_name: "Example Travel",
+                query: "Baan Kang Wat Chiang Mai",
+              },
+              {
+                image_url: "https://placehold.co/960x540/23576f/f4fbfd.png?text=Art+Village",
+                source_url: "https://example.com/art-village",
+                title: "Chiang Mai Art Village",
+                source_name: "Example Guide",
+                query: "Chiang Mai art village",
+              },
+              {
+                image_url: "https://placehold.co/960x540/286b76/f4fbfd.png?text=Craft+Studios",
+                source_url: "https://example.com/craft-studios",
+                title: "Craft studios",
+                source_name: "Example Culture",
+                query: "Chiang Mai art village",
+              },
+            ],
+          },
+          products: {
+            v: 1,
+            items: [
+              { name: "本地陶杯", tag: "手作 · 陶艺", url: "" },
+              { name: "棉麻手提袋", tag: "设计 · 纪念品", url: "" },
+            ],
+          },
+          "reference-list": {
+            v: 1,
+            reference_type: "grouped_webpages",
+            title: "相关网页",
+            items: [
+              {
+                name: "Baan Kang Wat visitor guide",
+                subtitle: "Opening hours and visitor information",
+                url: "https://example.com/visitor-guide",
+                image_url: "",
+              },
+              {
+                name: "Chiang Mai art spaces",
+                subtitle: "A local culture guide",
+                url: "https://example.com/art-spaces",
+                image_url: "",
+              },
+            ],
+          },
+        };
+
+        const encode = (value) => {
+          const bytes = new TextEncoder().encode(JSON.stringify(value));
+          let binary = "";
+          bytes.forEach((byte) => {
+            binary += String.fromCharCode(byte);
+          });
+          return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        };
+
+        document.querySelectorAll("[data-rich-kind]").forEach((link) => {
+          const kind = link.dataset.richKind;
+          link.href = `/turtle/ref/v1/${kind}#${encode(payloads[kind])}`;
+        });
+        document.querySelectorAll("[data-theme]").forEach((button) => {
+          button.addEventListener("click", () => {
+            document.documentElement.classList.toggle("light", button.dataset.theme === "light");
+            document.documentElement.classList.toggle("dark", button.dataset.theme !== "light");
+          });
+        });
+      })();
+    </script>
+    <script src="/branding/open-webui/storage-controls.js"></script>
+  </body>
+</html>

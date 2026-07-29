@@ -4,6 +4,7 @@
   const API_ROOT = "/api/v1/turtle/storage";
   const CHAT_API_ROOT = "/api/v1/turtle/chat";
   const PROJECT_API_ROOT = "/api/v1/turtle/project-api";
+  const RICH_REFERENCE_PREFIX = "/turtle/ref/v1/";
   const UPLOAD_PATHS = new Set(["/api/v1/files", "/api/v1/files/"]);
   const MANAGED_IMAGE_SELECTOR =
     'img[src*="/api/v1/files/"], img[src*="/api/v1/turtle/storage/files/"][src*="/thumbnail"]';
@@ -1192,6 +1193,358 @@
     });
   };
 
+  const safeRichReferenceUrl = (value) => {
+    if (typeof value !== "string" || value.length > 8192) return "";
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" || url.username || url.password || !url.hostname) return "";
+      return url.href;
+    } catch (_error) {
+      return "";
+    }
+  };
+
+  const boundedRichReferenceText = (value, limit = 240) =>
+    typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, limit) : "";
+
+  const richReferenceSearchUrl = (query, images = false) => {
+    const value = boundedRichReferenceText(query, 400);
+    if (!value) return "";
+    const route = images ? "/images/search" : "/search";
+    return `https://www.bing.com${route}?q=${encodeURIComponent(value)}`;
+  };
+
+  const parseRichReference = (link) => {
+    try {
+      const url = new URL(link.getAttribute("href") || "", window.location.origin);
+      if (url.origin !== window.location.origin || !url.pathname.startsWith(RICH_REFERENCE_PREFIX)) {
+        return null;
+      }
+      const kind = url.pathname.slice(RICH_REFERENCE_PREFIX.length);
+      if (!/^[a-z0-9-]{1,32}$/.test(kind) || !url.hash || url.hash.length > 70_000) return null;
+      const encoded = url.hash.slice(1).replace(/-/g, "+").replace(/_/g, "/");
+      const padded = encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+      const bytes = Uint8Array.from(window.atob(padded), (character) => character.charCodeAt(0));
+      const payload = JSON.parse(new TextDecoder().decode(bytes));
+      if (!payload || typeof payload !== "object" || Array.isArray(payload) || payload.v !== 1) return null;
+      return { kind, payload };
+    } catch (_error) {
+      return null;
+    }
+  };
+
+  const richReferenceHeader = (iconKind, title, subtitle = "") => {
+    const header = document.createElement("header");
+    const icon = document.createElement("span");
+    icon.className = "turtle-rich-reference-icon";
+    icon.innerHTML = mediaIcon(iconKind);
+    const copy = document.createElement("span");
+    const strong = document.createElement("strong");
+    strong.textContent = title;
+    copy.append(strong);
+    if (subtitle) {
+      const small = document.createElement("small");
+      small.textContent = subtitle;
+      copy.append(small);
+    }
+    header.append(icon, copy);
+    return header;
+  };
+
+  const createRichReferenceQueryLinks = (queries) => {
+    const footer = document.createElement("footer");
+    const label = document.createElement("span");
+    label.textContent = "图片搜索";
+    footer.append(label);
+    queries.forEach((query) => {
+      const href = richReferenceSearchUrl(query, true);
+      if (!href) return;
+      const link = document.createElement("a");
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.referrerPolicy = "no-referrer";
+      link.textContent = query;
+      footer.append(link);
+    });
+    return footer.childElementCount > 1 ? footer : null;
+  };
+
+  const createImageGroupReference = (payload) => {
+    const queries = Array.isArray(payload.queries)
+      ? payload.queries.map((query) => boundedRichReferenceText(query, 240)).filter(Boolean).slice(0, 8)
+      : [];
+    const rawImages = Array.isArray(payload.images) ? payload.images.slice(0, 12) : [];
+    const images = rawImages
+      .map((entry) => ({
+        imageUrl: safeRichReferenceUrl(entry?.image_url),
+        sourceUrl: safeRichReferenceUrl(entry?.source_url),
+        title: boundedRichReferenceText(entry?.title, 240),
+        sourceName: boundedRichReferenceText(entry?.source_name, 120),
+        query: boundedRichReferenceText(entry?.query, 240),
+      }))
+      .filter((entry) => entry.imageUrl);
+    const section = document.createElement("section");
+    section.className = "turtle-image-reference-group";
+    section.dataset.layout = ["bento", "grid"].includes(payload.layout) ? payload.layout : "carousel";
+    section.setAttribute("aria-label", `参考图片，共 ${images.length} 张`);
+    const ratio = /^(\d{1,2}):(\d{1,2})$/.exec(String(payload.aspect_ratio || ""));
+    if (ratio && Number(ratio[1]) > 0 && Number(ratio[2]) > 0) {
+      section.style.setProperty("--turtle-rich-image-ratio", `${ratio[1]} / ${ratio[2]}`);
+    }
+    section.append(
+      richReferenceHeader(
+        "image",
+        "参考图片",
+        queries.length ? queries.join(" · ") : `${images.length} 张图片`,
+      ),
+    );
+
+    if (images.length) {
+      const rail = document.createElement("div");
+      rail.className = "turtle-image-reference-rail";
+      let availableImages = images.length;
+      images.forEach((entry, index) => {
+        const card = document.createElement("a");
+        card.className = "turtle-image-reference-card";
+        card.href = entry.sourceUrl || entry.imageUrl;
+        card.target = "_blank";
+        card.rel = "noopener noreferrer";
+        card.referrerPolicy = "no-referrer";
+        card.setAttribute("aria-label", entry.title || `查看第 ${index + 1} 张参考图片`);
+        const image = document.createElement("img");
+        image.src = entry.imageUrl;
+        image.alt = entry.title || entry.query || "";
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.referrerPolicy = "no-referrer";
+        image.addEventListener(
+          "error",
+          () => {
+            card.hidden = true;
+            availableImages -= 1;
+            if (!availableImages) section.dataset.imagesUnavailable = "true";
+          },
+          { once: true },
+        );
+        const captionText = entry.title || entry.sourceName || entry.query;
+        if (captionText) {
+          const caption = document.createElement("span");
+          const strong = document.createElement("strong");
+          strong.textContent = captionText;
+          caption.append(strong);
+          if (entry.sourceName && entry.sourceName !== captionText) {
+            const small = document.createElement("small");
+            small.textContent = entry.sourceName;
+            caption.append(small);
+          }
+          card.append(image, caption);
+        } else {
+          card.append(image);
+        }
+        rail.append(card);
+      });
+      section.append(rail);
+    } else {
+      const empty = document.createElement("p");
+      empty.className = "turtle-image-reference-empty";
+      empty.textContent = queries.length
+        ? "图片结果暂时不可用，可通过下方关键词继续查看。"
+        : "图片结果暂时不可用。";
+      section.append(empty);
+    }
+    const queryLinks = createRichReferenceQueryLinks(queries);
+    if (queryLinks) section.append(queryLinks);
+    return section;
+  };
+
+  const richEntityTypeLabel = (value, kind) => {
+    const type = boundedRichReferenceText(value, 80).toLowerCase();
+    const labels = {
+      artist: "艺术家",
+      city: "城市",
+      event: "活动",
+      location: "地点",
+      organization: "机构",
+      person: "人物",
+      place: "地点",
+      point_of_interest: "地点",
+      product: "商品",
+      restaurant: "餐厅",
+    };
+    return labels[type] || (kind === "product" ? "商品" : type.replace(/_/g, " ") || "实体");
+  };
+
+  const createEntityReference = (kind, payload) => {
+    const name = boundedRichReferenceText(payload.name, 180);
+    if (!name) return null;
+    const description = boundedRichReferenceText(payload.description, 240);
+    const href =
+      safeRichReferenceUrl(payload.url) ||
+      richReferenceSearchUrl([name, description].filter(Boolean).join(" "));
+    const link = document.createElement("a");
+    link.className = "turtle-entity-reference";
+    if (href) {
+      link.href = href;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.referrerPolicy = "no-referrer";
+    }
+    const icon = document.createElement("span");
+    icon.className = "turtle-rich-reference-icon";
+    icon.innerHTML = mediaIcon(kind === "product" ? "file" : "chat");
+    const copy = document.createElement("span");
+    const strong = document.createElement("strong");
+    strong.textContent = name;
+    const small = document.createElement("small");
+    const typeLabel = richEntityTypeLabel(payload.entity_type, kind);
+    small.textContent = [typeLabel, description].filter(Boolean).join(" · ");
+    copy.append(strong, small);
+    link.append(icon, copy);
+    link.setAttribute("aria-label", `查看${typeLabel}：${name}`);
+    return link;
+  };
+
+  const createProductsReference = (payload) => {
+    const items = Array.isArray(payload.items)
+      ? payload.items
+          .map((item) => ({
+            name: boundedRichReferenceText(item?.name, 180),
+            tag: boundedRichReferenceText(item?.tag, 160),
+            url: safeRichReferenceUrl(item?.url),
+          }))
+          .filter((item) => item.name)
+          .slice(0, 10)
+      : [];
+    if (!items.length) return null;
+    const section = document.createElement("section");
+    section.className = "turtle-products-reference";
+    section.setAttribute("aria-label", `商品推荐，共 ${items.length} 项`);
+    section.append(richReferenceHeader("file", "商品推荐", `${items.length} 项`));
+    const list = document.createElement("div");
+    items.forEach((item) => {
+      const href = item.url || richReferenceSearchUrl(item.name);
+      const card = document.createElement(href ? "a" : "span");
+      card.className = "turtle-product-reference-card";
+      if (href) {
+        card.href = href;
+        card.target = "_blank";
+        card.rel = "noopener noreferrer";
+        card.referrerPolicy = "no-referrer";
+      }
+      const strong = document.createElement("strong");
+      strong.textContent = item.name;
+      card.append(strong);
+      if (item.tag) {
+        const small = document.createElement("small");
+        small.textContent = item.tag;
+        card.append(small);
+      }
+      list.append(card);
+    });
+    section.append(list);
+    return section;
+  };
+
+  const createReferenceList = (payload) => {
+    const title = boundedRichReferenceText(payload.title, 120) || "相关内容";
+    const items = Array.isArray(payload.items)
+      ? payload.items
+          .map((item) => ({
+            name: boundedRichReferenceText(item?.name, 180),
+            subtitle: boundedRichReferenceText(item?.subtitle, 240),
+            url: safeRichReferenceUrl(item?.url),
+            imageUrl: safeRichReferenceUrl(item?.image_url),
+          }))
+          .filter((item) => item.name)
+          .slice(0, 12)
+      : [];
+    if (!items.length) return null;
+    const section = document.createElement("section");
+    section.className = "turtle-reference-list";
+    section.setAttribute("aria-label", `${title}，共 ${items.length} 项`);
+    const referenceType = boundedRichReferenceText(payload.reference_type, 80);
+    const iconKind = /file/.test(referenceType) ? "file" : "cloud";
+    section.append(richReferenceHeader(iconKind, title, `${items.length} 项`));
+    const list = document.createElement("div");
+    items.forEach((item) => {
+      const card = document.createElement(item.url ? "a" : "span");
+      card.className = "turtle-reference-list-card";
+      if (item.url) {
+        card.href = item.url;
+        card.target = "_blank";
+        card.rel = "noopener noreferrer";
+        card.referrerPolicy = "no-referrer";
+      }
+      if (item.imageUrl) {
+        const image = document.createElement("img");
+        image.src = item.imageUrl;
+        image.alt = "";
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.referrerPolicy = "no-referrer";
+        card.append(image);
+      }
+      const copy = document.createElement("span");
+      const strong = document.createElement("strong");
+      strong.textContent = item.name;
+      copy.append(strong);
+      if (item.subtitle) {
+        const small = document.createElement("small");
+        small.textContent = item.subtitle;
+        copy.append(small);
+      }
+      card.append(copy);
+      list.append(card);
+    });
+    section.append(list);
+    return section;
+  };
+
+  const replaceRichReference = (link, reference) => {
+    let component = null;
+    if (reference.kind === "image-group") component = createImageGroupReference(reference.payload);
+    else if (reference.kind === "entity" || reference.kind === "product") {
+      component = createEntityReference(reference.kind, reference.payload);
+    } else if (reference.kind === "products") component = createProductsReference(reference.payload);
+    else if (reference.kind === "reference-list") component = createReferenceList(reference.payload);
+    if (!component) return false;
+    const blockComponent = component.matches("section");
+    const parent = link.parentElement;
+    const standaloneParagraph =
+      blockComponent &&
+      parent?.tagName === "P" &&
+      Array.from(parent.childNodes).every(
+        (node) => node === link || (node.nodeType === Node.TEXT_NODE && !String(node.textContent || "").trim()),
+      );
+    if (standaloneParagraph) parent.replaceWith(component);
+    else link.replaceWith(component);
+    return true;
+  };
+
+  const decorateRichContentReferences = () => {
+    document.querySelectorAll(`a[href*="${RICH_REFERENCE_PREFIX}"]`).forEach((link) => {
+      const reference = parseRichReference(link);
+      if (reference && replaceRichReference(link, reference)) return;
+      link.classList.add("turtle-unsupported-rich-reference");
+      link.setAttribute("aria-disabled", "true");
+      link.setAttribute("title", "此富内容暂时无法显示");
+      link.removeAttribute("href");
+      link.removeAttribute("target");
+      link.removeAttribute("rel");
+      link.tabIndex = -1;
+    });
+  };
+
+  const suppressRichReferenceNavigation = (event) => {
+    if (!(event.target instanceof Element)) return;
+    const link = event.target.closest(`a[href*="${RICH_REFERENCE_PREFIX}"]`);
+    if (!link) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    decorateRichContentReferences();
+  };
+
   const decorateResponsePresentation = () => {
     document.querySelectorAll("#response-content-container").forEach((container) => {
       const response = container.firstElementChild;
@@ -1223,6 +1576,7 @@
 
   const decorateManagedOutputs = () => {
     decorateResponsePresentation();
+    decorateRichContentReferences();
     decorateUnsupportedSandboxLinks();
     decorateGeneratedGalleries();
 
@@ -3548,6 +3902,7 @@
 
   const start = () => {
     document.documentElement.dataset.turtleStorage = "ready";
+    document.addEventListener("click", suppressRichReferenceNavigation, true);
     document.addEventListener("click", suppressUnsupportedSandboxNavigation, true);
     document.addEventListener("click", suppressManagedImageSourceNavigation, true);
     document.addEventListener("click", downloadManagedAttachmentOnPage, true);
