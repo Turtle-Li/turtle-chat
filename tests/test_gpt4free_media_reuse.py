@@ -379,11 +379,23 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         session = ConcurrentFakeSession()
         state = {"active": 0, "maximum": 0}
         release = asyncio.Event()
+        all_prepared = asyncio.Event()
+        original_post = session.post
+
+        def track_prepared(url, **kwargs):
+            response = original_post(url, **kwargs)
+            if session.create_count == 3:
+                all_prepared.set()
+            return response
+
+        session.post = track_prepared
 
         async def transfer(**_kwargs):
             state["active"] += 1
             state["maximum"] = max(state["maximum"], state["active"])
             if state["active"] == 2:
+                await asyncio.wait_for(all_prepared.wait(), timeout=1)
+                state["prepared_before_release"] = session.create_count
                 release.set()
             try:
                 await asyncio.wait_for(release.wait(), timeout=1)
@@ -445,6 +457,7 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
             ["image-0.png", "image-1.png", "image-2.png"],
         )
         self.assertEqual(state["maximum"], 2)
+        self.assertEqual(state["prepared_before_release"], 3)
         self.assertEqual(session.create_count, 3)
         self.assertEqual(session.confirm_count, 3)
         self.assertEqual(

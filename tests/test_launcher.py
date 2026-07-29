@@ -448,8 +448,11 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert '+PRIVATE_INPUT_FILE_CACHE_ATTR = "__turtle_input_file_cache"' in overlay
     assert '+                        f"{cls.url}/backend-api/files/{cached[\'file_id\']}/download",' in overlay
     assert '+                                metrics["file_cache_hit"] += 1' in overlay
-    assert '+                transfer = await transfer_media(' in overlay
-    assert '+        semaphore = asyncio.Semaphore(configured_parallel)' in overlay
+    assert "transfer = await transfer_media(" in overlay
+    assert "+        prepare_semaphore = asyncio.Semaphore(configured_parallel)" in overlay
+    assert "+        transfer_semaphore = asyncio.Semaphore(configured_parallel)" in overlay
+    assert "+                release_prepare()" in overlay
+    assert "+                async with transfer_slot():" in overlay
     assert "+            results = await asyncio.gather(" in overlay
     assert '+        "configured_parallel": 0,' in overlay
     assert '+        "max_parallel": 0,' in overlay
