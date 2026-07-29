@@ -4,6 +4,8 @@ import hashlib
 import re
 from pathlib import Path
 
+from turtle_asset_versioning import version_patched_module_chain
+
 
 _asset_version_hasher = hashlib.sha256()
 for _asset_version_path in (
@@ -2425,40 +2427,21 @@ replace_once(
 
 
 # Open WebUI's base build correctly gives content-hashed modules a one-year
-# immutable cache. Turtle patches some compiled modules after that hash was
-# assigned, so the original URL can otherwise keep an older patched body in a
-# browser or CDN for a year. Version every JavaScript module edge and the root
-# entry references with one content-derived query. Each release remains highly
-# cacheable, while a changed Turtle frontend obtains a new module graph URL.
-immutable_module_reference = re.compile(
-    r"(?P<quote>[\"'`])"
-    r"(?P<url>(?:/_app/immutable/|\./|\.\./)[^\"'`]+?\.js)"
-    r"(?P=quote)"
+# immutable cache. Turtle patches two compiled modules after that hash was
+# assigned, so their original URLs can otherwise keep an older body in a
+# browser or CDN for a year. Propagate a content-derived query only through
+# importers of those modified modules, just as a bundler would re-hash their
+# dependency chain. Unchanged shared modules keep their original identity.
+immutable_root = Path("/app/build/_app/immutable")
+versioned_modules = version_patched_module_chain(
+    immutable_root=immutable_root,
+    index_path=index_path,
+    initial_targets={messages_module.resolve(), image_module.resolve()},
+    version=TURTLE_ASSET_VERSION,
 )
-
-
-def version_immutable_module_references(path: Path) -> int:
-    source = path.read_text(encoding="utf-8")
-    updated, replacements = immutable_module_reference.subn(
-        lambda match: (
-            f"{match.group('quote')}{match.group('url')}"
-            f"?v={TURTLE_ASSET_VERSION}{match.group('quote')}"
-        ),
-        source,
-    )
-    if replacements:
-        path.write_text(updated, encoding="utf-8")
-    return replacements
-
-
-module_reference_count = sum(
-    version_immutable_module_references(module_path)
-    for module_path in Path("/app/build/_app/immutable").rglob("*.js")
-)
-index_module_reference_count = version_immutable_module_references(index_path)
-if not module_reference_count or not index_module_reference_count:
+if len(versioned_modules) <= 2:
     raise RuntimeError(
-        "Unable to version Open WebUI's immutable module graph. "
+        "Unable to version the import chain for Turtle's patched modules. "
         "The base image likely changed and the cache-busting patch needs review."
     )
 

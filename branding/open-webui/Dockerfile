@@ -24,6 +24,7 @@ COPY turtle_chat /app/backend/open_webui/turtle_chat
 COPY turtle_project_api /app/backend/open_webui/turtle_project_api
 COPY turtle_storage /app/backend/open_webui/turtle_storage
 COPY patch_open_webui.py /tmp/patch_open_webui.py
+COPY turtle_asset_versioning.py /tmp/turtle_asset_versioning.py
 
 COPY assets/favicon.png /app/build/static/favicon.png
 COPY assets/favicon.png /app/build/static/favicon-dark.png
@@ -42,7 +43,7 @@ COPY assets/favicon.png /app/build/favicon.png
 
 RUN python /tmp/patch_open_webui.py \
     && python -m compileall -q /app/backend/open_webui \
-    && rm /tmp/patch_open_webui.py /tmp/turtle-client-read-cache.js
+    && rm /tmp/patch_open_webui.py /tmp/turtle_asset_versioning.py /tmp/turtle-client-read-cache.js
 
 LABEL org.opencontainers.image.title="Turtle's Chat Open WebUI"
 LABEL org.opencontainers.image.description="Private Turtle's Chat brand layer for Open WebUI"

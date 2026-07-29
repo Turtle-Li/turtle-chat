@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 from pathlib import Path
 
 
@@ -44,12 +45,64 @@ def test_exact_chat_reads_are_rerouted_to_the_paged_history_api():
     assert "while(K&&L<=b())" in patcher
     assert "return L<=b()" in patcher
     assert "TURTLE_ASSET_VERSION" in patcher
-    assert "version_immutable_module_references" in patcher
-    assert "Path(\"/app/build/_app/immutable\").rglob(\"*.js\")" in patcher
+    assert "version_patched_module_chain" in patcher
+    assert "initial_targets={messages_module.resolve(), image_module.resolve()}" in patcher
     assert "sync_chat_history_index" in patcher
 
     dockerfile = (BRANDING / "Dockerfile").read_text(encoding="utf-8")
     assert "python -m compileall -q /app/backend/open_webui" in dockerfile
+
+
+def test_asset_versioning_changes_only_patched_module_importer_chain(tmp_path):
+    module_path = BRANDING / "turtle_asset_versioning.py"
+    spec = importlib.util.spec_from_file_location("turtle_asset_versioning", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    immutable = tmp_path / "_app" / "immutable"
+    chunks = immutable / "chunks"
+    entry = immutable / "entry"
+    chunks.mkdir(parents=True)
+    entry.mkdir()
+    leaf = chunks / "leaf.js"
+    parent = chunks / "parent.js"
+    shared = chunks / "shared.js"
+    start = entry / "start.js"
+    index = tmp_path / "index.html"
+
+    leaf.write_text("export const leaf = true;\n", encoding="utf-8")
+    parent.write_text(
+        'import { leaf } from "./leaf.js"; export { leaf };\n',
+        encoding="utf-8",
+    )
+    shared.write_text("export const shared = true;\n", encoding="utf-8")
+    start.write_text(
+        'import "../chunks/parent.js"; import "../chunks/shared.js";\n',
+        encoding="utf-8",
+    )
+    index.write_text(
+        '<script type="module" src="/_app/immutable/entry/start.js"></script>'
+        '<link rel="modulepreload" href="/_app/immutable/chunks/shared.js">',
+        encoding="utf-8",
+    )
+
+    versioned = module.version_patched_module_chain(
+        immutable_root=immutable,
+        index_path=index,
+        initial_targets={leaf},
+        version="0123456789abcdef",
+    )
+
+    assert versioned == {leaf.resolve(), parent.resolve(), start.resolve()}
+    assert '"./leaf.js?v=0123456789abcdef"' in parent.read_text(encoding="utf-8")
+    assert '"../chunks/parent.js?v=0123456789abcdef"' in start.read_text(
+        encoding="utf-8"
+    )
+    assert '"../chunks/shared.js"' in start.read_text(encoding="utf-8")
+    index_source = index.read_text(encoding="utf-8")
+    assert "/entry/start.js?v=0123456789abcdef" in index_source
+    assert "/chunks/shared.js?v=" not in index_source
 
 
 def test_main_files_and_static_thumbnails_have_distinct_cdn_prefixes():
