@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,3 +102,12 @@ def test_existing_chat_batch_stages_one_complete_turn_without_mutating_source() 
     assert batch.messages["assistant-new"]["parentId"] == "user-new"
     assert batch.chat["files"] == []
     assert batch.variables == {"new": True}
+
+
+def test_existing_chat_batch_keeps_auxiliary_index_off_send_critical_path() -> None:
+    commit_source = inspect.getsource(ExistingChatWriteBatch.commit)
+
+    assert commit_source.count("await session.commit()") == 1
+    assert "sync_chat_history_index" not in commit_source
+    assert "index_mode=lazy" in commit_source
+    assert "await session.flush()" in commit_source

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import logging
 import time
@@ -13,139 +12,80 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 
-async def _sync_changed_history_rows(
+async def _stage_normalized_message(
     *,
     session: Any,
     chat_id: str,
     user_id: str,
-    changed_order: list[str],
-    changed_messages: dict[str, dict[str, Any]],
-    chat: dict[str, Any],
-    chat_updated_at: int,
-) -> bool:
-    """Update all changed range-index rows under one state lock/commit."""
+    message_id: str,
+    data: dict[str, Any],
+) -> None:
+    """Stage one ``chat_message`` upsert in the caller's transaction."""
 
-    from open_webui.turtle_chat.history import (
-        TurtleChatHistoryMessage,
-        TurtleChatHistoryState,
-        _chat_shell,
-        _safe_timestamp,
-        ensure_history_schema,
-    )
-    from sqlalchemy import select
+    from open_webui.models.chat_messages import ChatMessage, get_usage
+    from open_webui.utils.response import merge_usage, normalize_usage
 
-    await ensure_history_schema(session)
-    state_result = await session.execute(
-        select(TurtleChatHistoryState)
-        .where(TurtleChatHistoryState.chat_id == chat_id)
-        .with_for_update()
-    )
-    state = state_result.scalar_one_or_none()
-    if state is None or int(state.chat_updated_at) < 0:
-        return False
-
-    rows: dict[str, Any] = {}
-    for message_id in changed_order:
-        rows[message_id] = await session.get(
-            TurtleChatHistoryMessage,
-            {"chat_id": chat_id, "message_id": message_id},
-        )
-
-    history = chat.get("history") if isinstance(chat.get("history"), dict) else {}
-    all_messages = (
-        history.get("messages")
-        if isinstance(history.get("messages"), dict)
-        else {}
-    )
-    final_count = len(all_messages)
-    new_count = sum(1 for row in rows.values() if row is None)
-    if int(state.message_count) != final_count - new_count:
-        state.chat_updated_at = -1
-        await session.commit()
-        return False
-
-    for message_id in changed_order:
-        payload = copy.deepcopy(changed_messages[message_id])
-        parent_value = (
-            payload.get("parentId")
-            if "parentId" in payload
-            else payload.get("parent_id")
-        )
-        parent_id = (
-            str(parent_value)
-            if parent_value not in {None, ""}
-            else None
-        )
-        row = rows[message_id]
-        if row is not None and (row.parent_id or None) != parent_id:
-            state.chat_updated_at = -1
-            await session.commit()
-            return False
-
-        if row is None:
-            parent_depth = -1
-            if parent_id is not None:
-                parent = rows.get(parent_id)
-                if parent is None:
-                    parent = await session.get(
-                        TurtleChatHistoryMessage,
-                        {"chat_id": chat_id, "message_id": parent_id},
-                    )
-                if parent is None:
-                    state.chat_updated_at = -1
-                    await session.commit()
-                    return False
-                parent_depth = int(parent.depth)
-            row = TurtleChatHistoryMessage(
+    now = int(time.time())
+    composite_id = f"{chat_id}-{message_id}"
+    existing = await session.get(ChatMessage, composite_id)
+    if existing is None:
+        session.add(
+            ChatMessage(
+                id=composite_id,
                 chat_id=chat_id,
-                message_id=message_id,
                 user_id=user_id,
-                depth=parent_depth + 1,
-                parent_id=parent_id,
-                created_at=_safe_timestamp(payload.get("timestamp")),
-                payload={},
+                role=data.get("role", "user"),
+                parent_id=data.get("parent_id") or data.get("parentId"),
+                content=data.get("content"),
+                output=data.get("output"),
+                model_id=data.get("model_id") or data.get("model"),
+                files=data.get("files"),
+                sources=data.get("sources"),
+                embeds=data.get("embeds"),
+                meta=data.get("meta"),
+                done=data.get("done", True),
+                status_history=data.get("status_history")
+                or data.get("statusHistory"),
+                error=data.get("error"),
+                usage=get_usage(data),
+                context_summary=data.get("context_summary")
+                or data.get("contextSummary"),
+                created_at=data.get("timestamp", now),
+                updated_at=now,
             )
-            session.add(row)
-            rows[message_id] = row
-
-        payload["id"] = message_id
-        payload["parentId"] = parent_id
-        payload["childrenIds"] = (
-            payload.get("childrenIds")
-            if isinstance(payload.get("childrenIds"), list)
-            else []
         )
-        payload.setdefault("content", "")
-        row.user_id = user_id
-        row.parent_id = parent_id
-        row.created_at = _safe_timestamp(payload.get("timestamp"))
-        row.payload = payload
+        return
 
-    current_id_value = history.get("currentId")
-    current_id = str(current_id_value) if current_id_value else None
-    current_row = rows.get(current_id) if current_id else None
-    if current_id and current_row is None:
-        current_row = await session.get(
-            TurtleChatHistoryMessage,
-            {"chat_id": chat_id, "message_id": current_id},
+    if "role" in data:
+        existing.role = data["role"]
+    if "parent_id" in data or "parentId" in data:
+        existing.parent_id = data.get("parent_id") or data.get("parentId")
+    for key in ("content", "output", "files", "sources", "embeds", "meta", "error"):
+        if key in data:
+            setattr(existing, key, data.get(key))
+    if "model_id" in data or "model" in data:
+        existing.model_id = data.get("model_id") or data.get("model")
+    if "done" in data:
+        existing.done = data.get("done", True)
+    if "status_history" in data or "statusHistory" in data:
+        existing.status_history = data.get("status_history") or data.get(
+            "statusHistory"
         )
-    if current_id and current_row is None:
-        state.chat_updated_at = -1
-        await session.commit()
-        return False
-
-    all_depths = [int(row.depth) for row in rows.values() if row is not None]
-    state.user_id = user_id
-    state.chat_updated_at = int(chat_updated_at or 0)
-    state.current_message_id = current_id
-    state.current_depth = int(current_row.depth) if current_row is not None else 0
-    state.min_depth = min([int(state.min_depth or 0), *all_depths])
-    state.max_depth = max([int(state.max_depth or 0), *all_depths])
-    state.message_count = final_count
-    state.shell = _chat_shell(chat, current_message_id=current_id)
-    state.indexed_at = int(time.time())
-    await session.commit()
-    return True
+    if "context_summary" in data or "contextSummary" in data:
+        existing.context_summary = data.get("context_summary") or data.get(
+            "contextSummary"
+        )
+    usage = get_usage(data)
+    if usage:
+        existing_usage = (
+            normalize_usage(existing.usage or {}) if existing.usage else {}
+        )
+        existing.usage = (
+            existing_usage
+            if usage == existing_usage
+            else merge_usage(existing_usage, usage)
+        )
+    existing.updated_at = now
 
 
 class ExistingChatWriteBatch:
@@ -154,10 +94,11 @@ class ExistingChatWriteBatch:
     Open WebUI's ordinary path updates the embedded chat JSON, normalized
     ``chat_message`` row, and Turtle range index for every small graph change.
     A foreground turn changes the user message, its two adjacent links, and
-    the assistant placeholder together.  Rewriting the same JSON four times
-    delays upstream dispatch without adding durability.  This batch keeps the
-    same three stores in sync while committing the authoritative chat JSON
-    only once.
+    the assistant placeholder together. Rewriting the same JSON four times
+    delays upstream dispatch without adding durability. This batch commits
+    the authoritative JSON and normalized rows in one transaction. The range
+    index intentionally becomes stale by timestamp and rebuilds lazily from
+    that authoritative JSON on the next bounded history read.
     """
 
     def __init__(
@@ -224,9 +165,7 @@ class ExistingChatWriteBatch:
         # These imports deliberately stay lazy so the helper remains testable
         # outside the pinned Open WebUI image.
         from open_webui.internal.db import get_async_db_context
-        from open_webui.models.chat_messages import ChatMessages
         from open_webui.models.chats import Chat, Chats
-        from open_webui.turtle_chat.history import sync_chat_history_index
         from open_webui.turtle_chat.provider import meta_with_provider
         from sqlalchemy import select
         from sqlalchemy.orm.attributes import flag_modified
@@ -280,96 +219,64 @@ class ExistingChatWriteBatch:
             chat_item.current_message_id = Chats.get_current_message_id(clean_chat)
             chat_item.updated_at = int(time.time())
             flag_modified(chat_item, "chat")
+
+            changed = {
+                message_id: saved_messages[message_id]
+                for message_id in self._changed_message_order
+                if message_id in self._changed_message_ids
+                and message_id in saved_messages
+            }
+            normalized_started = time.perf_counter()
+            normalized_error: Exception | None = None
+            if changed:
+                try:
+                    async with session.begin_nested():
+                        for message_id, message in changed.items():
+                            await _stage_normalized_message(
+                                session=session,
+                                chat_id=self.chat_id,
+                                user_id=self.user_id,
+                                message_id=message_id,
+                                data=message,
+                            )
+                        # Surface a compatibility-row error inside the
+                        # savepoint so the authoritative chat JSON can still
+                        # commit on the fallback path.
+                        await session.flush()
+                except Exception as exc:
+                    normalized_error = exc
+            normalized_ms = int(
+                (time.perf_counter() - normalized_started) * 1000
+            )
+
             chat_commit_started = time.perf_counter()
             await session.commit()
             chat_commit_ms = int(
                 (time.perf_counter() - chat_commit_started) * 1000
             )
 
-            index_started = time.perf_counter()
+        if normalized_error is not None:
+            log.warning(
+                "Batch chat_message dual-write failed (%s); reconciling",
+                type(normalized_error).__name__,
+            )
             try:
-                incremental_indexed = await _sync_changed_history_rows(
-                    session=session,
-                    chat_id=self.chat_id,
-                    user_id=self.user_id,
-                    changed_order=self._changed_message_order,
-                    changed_messages=saved_messages,
-                    chat=clean_chat,
-                    chat_updated_at=chat_item.updated_at,
-                )
-                if not incremental_indexed:
-                    await sync_chat_history_index(
-                        self.chat_id,
-                        self.user_id,
-                        clean_chat,
-                        chat_item.updated_at,
-                        db=session,
-                    )
-            except Exception as exc:
-                log.warning(
-                    "Failed to batch-update indexed chat history for %s: %s",
-                    self.chat_id,
-                    type(exc).__name__,
-                )
-                await session.rollback()
-                await sync_chat_history_index(
+                await Chats.reconcile_messages_by_chat_id(
                     self.chat_id,
                     self.user_id,
-                    clean_chat,
-                    chat_item.updated_at,
-                    db=session,
+                    clean_chat.get("history", {}).get("messages", {}),
                 )
-            index_ms = int((time.perf_counter() - index_started) * 1000)
-
-        changed = {
-            message_id: saved_messages[message_id]
-            for message_id in self._changed_message_ids
-            if message_id in saved_messages
-        }
-        if not changed:
-            log.info(
-                "turtle_chat_write_batch row_lock_ms=%d chat_commit_ms=%d "
-                "index_ms=%d normalized_ms=0 total_ms=%d changed=0",
-                row_lock_ms,
-                chat_commit_ms,
-                index_ms,
-                int((time.perf_counter() - batch_started) * 1000),
-            )
-            return
-
-        normalized_started = time.perf_counter()
-        results = await asyncio.gather(
-            *(
-                ChatMessages.upsert_message(
-                    message_id=message_id,
-                    chat_id=self.chat_id,
-                    user_id=self.user_id,
-                    data=message,
+            except Exception as exc:
+                log.warning(
+                    "Batch chat_message reconciliation failed (%s)",
+                    type(exc).__name__,
                 )
-                for message_id, message in changed.items()
-            ),
-            return_exceptions=True,
-        )
-        if any(isinstance(result, BaseException) for result in results):
-            # The embedded JSON is authoritative.  Repair the normalized rows
-            # on this exceptional path instead of making every normal request
-            # pay for a full-history reconciliation.
-            log.warning(
-                "Batch chat_message dual-write failed for %s; reconciling",
-                self.chat_id,
-            )
-            await Chats.reconcile_messages_by_chat_id(
-                self.chat_id,
-                self.user_id,
-                clean_chat.get("history", {}).get("messages", {}),
-            )
-        normalized_ms = int((time.perf_counter() - normalized_started) * 1000)
+
         log.info(
             "turtle_chat_write_batch row_lock_ms=%d chat_commit_ms=%d "
-            "index_ms=%d normalized_ms=%d total_ms=%d changed=%d",
+            "index_ms=0 index_mode=lazy normalized_ms=%d total_ms=%d changed=%d",
             row_lock_ms,
             chat_commit_ms,
-            index_ms,
             normalized_ms,
             int((time.perf_counter() - batch_started) * 1000),
             len(changed),
