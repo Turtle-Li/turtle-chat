@@ -1638,7 +1638,13 @@ def create_app(
             else resolved.default_account_pool_id
         )
 
-        logger.info("request_started id=%s stream=%s backend=%s", request_id, body.stream, resolved.backend)
+        logger.info(
+            "request_started id=%s stream=%s backend=%s tool_count=%d",
+            request_id,
+            body.stream,
+            resolved.backend,
+            len(getattr(body, "tools", None) or []),
+        )
 
         if resolved.backend == "mock":
             authorization_error = await authorize_project_request("mock")
