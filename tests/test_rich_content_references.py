@@ -16,10 +16,12 @@ RUNTIME_IMPORT_ERROR = None
 try:
     from g4f.Provider.needs_auth.OpenaiChat import (  # noqa: E402
         ContentReferences,
+        _image_group_needs_metadata,
         _render_turtle_content_reference,
     )
 except ModuleNotFoundError as exc:
     ContentReferences = None
+    _image_group_needs_metadata = None
     _render_turtle_content_reference = None
     RUNTIME_IMPORT_ERROR = exc
 
@@ -129,6 +131,37 @@ def test_image_group_uses_matching_metadata_and_filters_unsafe_urls() -> None:
         }
     ]
     assert '"num_per_query"' not in markdown
+
+
+@requires_runtime
+def test_image_group_waits_for_late_metadata_until_terminal_event() -> None:
+    payload = {
+        "aspect_ratio": "16:9",
+        "query": ["Baan Kang Wat Chiang Mai"],
+        "num_per_query": 2,
+    }
+    references = ContentReferences()
+
+    assert _image_group_needs_metadata(payload, references, finished=False)
+    assert not _image_group_needs_metadata(payload, references, finished=True)
+
+    references.ingest_references(
+        [
+            {
+                "type": "image_group",
+                "images": [
+                    {
+                        "image_search_query": "Baan Kang Wat Chiang Mai",
+                        "image_result": {
+                            "content_url": "https://images.example.test/baan.jpg",
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert not _image_group_needs_metadata(payload, references, finished=False)
 
 
 @requires_runtime

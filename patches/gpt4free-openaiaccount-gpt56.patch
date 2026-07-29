@@ -1,5 +1,5 @@
 diff --git a/g4f/Provider/needs_auth/OpenaiChat.py b/g4f/Provider/needs_auth/OpenaiChat.py
-index 36d75ec..3c90f7c 100644
+index 36d75ec..d3a039d 100644
 --- a/g4f/Provider/needs_auth/OpenaiChat.py
 +++ b/g4f/Provider/needs_auth/OpenaiChat.py
 @@ -4,6 +4,7 @@ import asyncio
@@ -46,7 +46,7 @@ index 36d75ec..3c90f7c 100644
  from ..openai.har_file import get_request_config
  from ..openai.har_file import RequestConfig, arkReq, arkose_url, start_url, conversation_url, backend_url, prepare_url, \
      backend_anon_url
-@@ -93,6 +104,1280 @@ UPLOAD_HEADERS = {
+@@ -93,6 +104,1304 @@ UPLOAD_HEADERS = {
  }
  
  ImagesCache: Dict[str, dict] = {}
@@ -359,6 +359,19 @@ index 36d75ec..3c90f7c 100644
 +    return images
 +
 +
++def _image_group_needs_metadata(
++    payload: Any,
++    references: "ContentReferences",
++    *,
++    finished: bool,
++) -> bool:
++    if finished:
++        return False
++    queries = _image_group_queries(payload)
++    reference = _find_image_group_reference(queries, references)
++    return not _image_group_images(reference)
++
++
 +def _render_image_group_reference(
 +    payload: Any,
 +    references: "ContentReferences",
@@ -366,6 +379,17 @@ index 36d75ec..3c90f7c 100644
 +    queries = _image_group_queries(payload)
 +    reference = _find_image_group_reference(queries, references)
 +    images = _image_group_images(reference)
++    candidate_count = sum(
++        1
++        for item in references.list
++        if isinstance(item, dict) and item.get("type") == "image_group"
++    )
++    debug.log(
++        "OpenaiChat: Rich image group resolved "
++        f"queries={len(queries)} "
++        f"candidates={candidate_count} "
++        f"images={len(images)}"
++    )
 +    layout = ""
 +    aspect_ratio = ""
 +    if isinstance(payload, dict):
@@ -1327,7 +1351,7 @@ index 36d75ec..3c90f7c 100644
  
  
  class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
-@@ -121,11 +1406,24 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -121,11 +1430,24 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      _headers: dict = None
      _cookies: Cookies = None
      _expires: int = None
@@ -1353,7 +1377,7 @@ index 36d75ec..3c90f7c 100644
              async with session.get(cls.quota_url) as response:
                  user = await response.json()
                  return {"id": user.get("id"), "name": user.get("name")}
-@@ -151,29 +1449,234 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -151,29 +1473,234 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              turnstile_token=cls.request_config.turnstile_token
          )
  
@@ -1590,7 +1614,7 @@ index 36d75ec..3c90f7c 100644
              data_bytes = to_bytes(file)
              # Check Cache
              hasher = hashlib.md5()
-@@ -251,11 +1754,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -251,11 +1778,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      def create_messages(cls, messages: Messages, image_requests: ImageRequest = None, system_hints: list = None):
          """
          Create a list of messages for the user input
@@ -1604,7 +1628,7 @@ index 36d75ec..3c90f7c 100644
          Returns:
              A list of messages with the user input and the image, if any
          """
-@@ -289,9 +1792,15 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -289,9 +1816,15 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  "content_type": "multimodal_text",
                  "parts": [*[{
                      "asset_pointer": f"file-service://{image_request.get('file_id')}",
@@ -1622,7 +1646,7 @@ index 36d75ec..3c90f7c 100644
                  }
                      for image_request in image_requests
                      # Add For Images Only
-@@ -312,6 +1821,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -312,6 +1845,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                              "width": image_request.get("width"),
                          }
                          if image_request.get("use_case") == "multimodal"
@@ -1631,7 +1655,7 @@ index 36d75ec..3c90f7c 100644
                          else {}
                      ),
                  }
-@@ -322,7 +1833,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -322,7 +1857,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      @classmethod
      async def get_generated_image(cls, session: StreamSession, auth_result: AuthResult, element: Union[dict, str],
                                    prompt: str = None, conversation_id: str = None,
@@ -1641,7 +1665,7 @@ index 36d75ec..3c90f7c 100644
          download_urls = []
          is_sediment = False
          if prompt is None:
-@@ -339,6 +1851,14 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -339,6 +1875,14 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              element = element.split("sediment://")[-1]
          else:
              raise RuntimeError(f"Invalid image element: {element}")
@@ -1656,7 +1680,7 @@ index 36d75ec..3c90f7c 100644
          if is_sediment:
              url = f"{cls.url}/backend-api/conversation/{conversation_id}/attachment/{element}/download"
          else:
-@@ -350,8 +1870,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -350,8 +1894,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  data = await response.json()
                  download_url = data.get("download_url")
                  if download_url is not None:
@@ -1667,7 +1691,7 @@ index 36d75ec..3c90f7c 100644
                  else:
                      debug.log("OpenaiChat: No download URL found in response: ", data)
          except Exception as e:
-@@ -360,9 +1880,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -360,9 +1904,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
          if download_urls:
              # status = None, finished_successfully
              if is_sediment and status != "finished_successfully":
@@ -1679,7 +1703,7 @@ index 36d75ec..3c90f7c 100644
  
      @classmethod
      async def create_authed(
-@@ -383,6 +1903,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -383,6 +1927,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
          temporary: Optional[bool] = None,
          conversation_id: Optional[str] = None,
          reasoning_effort: Optional[str] = None,
@@ -1687,7 +1711,7 @@ index 36d75ec..3c90f7c 100644
          **kwargs
      ) -> AsyncResult:
          """
-@@ -415,8 +1936,38 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -415,8 +1960,38 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              impersonate="chrome",
              timeout=timeout
          ) as session:
@@ -1727,7 +1751,7 @@ index 36d75ec..3c90f7c 100644
              if not cls.needs_auth and not media:
                  if cls._headers is None:
                      cls._create_request_args(cls._cookies)
-@@ -428,12 +1979,15 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -428,12 +2003,15 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      cls._create_request_args(auth_result.cookies, auth_result.headers)
                  if not cls._set_api_key(getattr(auth_result, "api_key", None)):
                      raise MissingAuthError("Access token is not valid")
@@ -1747,7 +1771,7 @@ index 36d75ec..3c90f7c 100644
                  # except Exception as e:
                  #     debug.error("OpenaiChat: Upload image failed")
                  #     debug.error(e)
-@@ -441,15 +1995,25 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -441,15 +2019,25 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  model = cls.get_model(model)
              except ModelNotFoundError:
                  pass
@@ -1778,7 +1802,7 @@ index 36d75ec..3c90f7c 100644
              if conversation_mode is None:
                  _gizmo_id = kwargs.get("gizmo_id")
                  if _gizmo_id:
-@@ -457,18 +2021,32 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -457,18 +2045,32 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  else:
                      conversation_mode = {"kind": "primary_assistant"}
  
@@ -1814,7 +1838,7 @@ index 36d75ec..3c90f7c 100644
              while conversation.finish_reason is None:
                  conduit_token = None
                  if cls._api_key is not None:
-@@ -484,34 +2062,41 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -484,34 +2086,41 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          "supports_buffering": True,
                          "supported_encodings": ["v1"]
                      }
@@ -1879,7 +1903,7 @@ index 36d75ec..3c90f7c 100644
  
                      # if need_arkose and cls.request_config.arkose_token is None:
                  #     await get_request_config(proxy)
-@@ -519,11 +2104,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -519,11 +2128,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  #     cls._set_api_key(auth_result.access_token)
                  #     if auth_result.arkose_token is None:
                  #         raise MissingAuthError("No arkose token found in .har file")
@@ -1892,7 +1916,7 @@ index 36d75ec..3c90f7c 100644
                      proofofwork = generate_proof_token(
                          **chat_requirements["proofofwork"],
                          user_agent=user_agent,
-@@ -550,6 +2132,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -550,6 +2156,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                 "screen_height": 1080, "screen_width": 1920},
                      "paragen_cot_summary_display_override": "allow"
                  }
@@ -1901,7 +1925,7 @@ index 36d75ec..3c90f7c 100644
                  if temporary:
                      data["history_and_training_disabled"] = True
  
-@@ -592,19 +2176,46 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -592,19 +2200,46 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      headers=headers
                  ) as response:
                      cls._update_request_args(auth_result, session)
@@ -1950,7 +1974,7 @@ index 36d75ec..3c90f7c 100644
                              generated_image = await cls.get_generated_image(session, auth_result, match.group(0),
                                                                              prompt)
                              if generated_image is not None:
-@@ -612,6 +2223,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -612,6 +2247,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources,
                                                                    references):
                              if isinstance(chunk, str):
@@ -1959,7 +1983,7 @@ index 36d75ec..3c90f7c 100644
                                  chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
                                  buffer += chunk
                                  if buffer.find(u"\ue200") != -1:
-@@ -659,23 +2272,16 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -659,23 +2296,33 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                      return f"[[{source_index + 1}]]({link})"
                                                  return f""
  
@@ -1980,6 +2004,23 @@ index 36d75ec..3c90f7c 100644
                                              sequence_content = sequence_content.replace("\ue200", "").replace("\ue202",
                                                                                                                "\n").replace(
                                                  "\ue201", "")
++                                            reference_type, reference_payload = _content_reference_payload(
++                                                sequence_content
++                                            )
++                                            if (
++                                                reference_type == "image_group"
++                                                and _image_group_needs_metadata(
++                                                    reference_payload,
++                                                    references,
++                                                    finished=conversation.finish_reason is not None,
++                                                )
++                                            ):
++                                                # ChatGPT can stream the inline image-group marker
++                                                # before its content_references metadata. Keep the
++                                                # complete PUA sequence buffered until metadata (or
++                                                # the terminal event) arrives so images are not
++                                                # prematurely reduced to a query-only card.
++                                                return match.group(0)
 +                                            turtle_reference = _render_turtle_content_reference(
 +                                                sequence_content,
 +                                                references,
@@ -1989,7 +2030,7 @@ index 36d75ec..3c90f7c 100644
                                              sequence_content = sequence_content.replace("navlist\n", "#### ")
  
                                              # Handle search, news, view and image citations
-@@ -686,10 +2292,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -686,10 +2333,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                  citation_replacer,
                                                  sequence_content
                                              )
@@ -2000,7 +2041,7 @@ index 36d75ec..3c90f7c 100644
                                              return sequence_content
  
                                          # process only completed sequences and do not touch start of next not completed sequence
-@@ -702,19 +2304,48 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -702,19 +2345,48 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                          # do not yield to consume rest part of special sequence
                                          continue
  
@@ -2053,7 +2094,7 @@ index 36d75ec..3c90f7c 100644
                      conversation.generated_images = None
                  conversation.prompt = None
                  if return_conversation:
-@@ -733,14 +2364,94 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -733,14 +2405,94 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      break
  
              if conversation.task and kwargs.get("wait_media", True):
@@ -2152,7 +2193,7 @@ index 36d75ec..3c90f7c 100644
      @classmethod
      async def wss_media(
          cls,
-@@ -801,6 +2512,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -801,6 +2553,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                  conversation.prompt or "",
                                  conversation.conversation_id,
                                  status,
@@ -2160,7 +2201,7 @@ index 36d75ec..3c90f7c 100644
                              )
                              if generated_images is not None:
                                  yield generated_images
-@@ -820,11 +2532,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -820,11 +2573,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      ) -> AsyncGenerator[Any, None]:
          start_time = asyncio.get_event_loop().time()
          seen_assets: Set[str] = set()
@@ -2174,7 +2215,7 @@ index 36d75ec..3c90f7c 100644
              if timeout is not None:
                  elapsed = asyncio.get_event_loop().time() - start_time
                  if elapsed > timeout:
-@@ -839,33 +2549,47 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -839,33 +2590,47 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
  
              mapping = data.get("mapping") or {}
              if not mapping:
@@ -2241,7 +2282,7 @@ index 36d75ec..3c90f7c 100644
                      generated_images = await cls.get_generated_image(
                          session,
                          auth_result,
-@@ -875,13 +2599,188 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -875,13 +2640,188 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          or "",
                          conversation.conversation_id,
                          status,
@@ -2431,7 +2472,7 @@ index 36d75ec..3c90f7c 100644
      @classmethod
      async def iter_messages_line(cls, session: StreamSession, auth_result: AuthResult, line: bytes,
                                   fields: Conversation, sources: OpenAISources,
-@@ -896,6 +2795,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -896,6 +2836,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              return
          if not isinstance(line, dict):
              return
@@ -2443,7 +2484,7 @@ index 36d75ec..3c90f7c 100644
          if "type" in line:
              if line["type"] == "title_generation":
                  yield TitleGeneration(line["title"])
-@@ -903,11 +2807,29 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -903,11 +2848,29 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
          if fields.p is not None and fields.p.startswith("/message/content/thoughts"):
              if fields.p.endswith("/content"):
                  if fields.thoughts_summary:
@@ -2475,7 +2516,7 @@ index 36d75ec..3c90f7c 100644
              return
          if "v" in line:
              v = line.get("v")
-@@ -923,80 +2845,153 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -923,80 +2886,153 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          buffer += m.get("v")
                      elif m.get("p") == "/message/metadata/image_gen_title":
                          fields.prompt = m.get("v")
@@ -2567,8 +2608,7 @@ index 36d75ec..3c90f7c 100644
 -                                                 m.get("p")) and isinstance(m.get("v"), list):
 -                        match = re.match(r"^/message/metadata/content_references/(\d+)/refs$", m.get("p"))
 -                        if match:
-+                        if match and reference_value:
-                             idx = int(match.group(1))
+-                            idx = int(match.group(1))
 -                            references.update_reference(idx, m.get("o"), "refs", m.get("v"))
 -                    elif m.get("p") and re.match(r"^/message/metadata/content_references/\d+/alt$",
 -                                                 m.get("p")) and isinstance(m.get("v"), list):
@@ -2580,7 +2620,8 @@ index 36d75ec..3c90f7c 100644
 -                                                 m.get("p")) and isinstance(m.get("v"), list):
 -                        match = re.match(r"^/message/metadata/content_references/(\d+)/prompt_text$", m.get("p"))
 -                        if match:
--                            idx = int(match.group(1))
++                        if match and reference_value:
+                             idx = int(match.group(1))
 -                            references.update_reference(idx, m.get("o"), "prompt_text", m.get("v"))
 +                            if m.get("o") == "remove":
 +                                if idx < len(references.list):
@@ -2680,7 +2721,7 @@ index 36d75ec..3c90f7c 100644
                      elif m.get("p") == "/message/metadata/finished_text":
                          fields.is_thinking = False
                          if buffer:
-@@ -1011,23 +3006,72 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1011,23 +3047,72 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  if fields.conversation_id is None:
                      fields.conversation_id = v.get("conversation_id")
                      debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
@@ -2763,7 +2804,7 @@ index 36d75ec..3c90f7c 100644
                          fields.task = v
              return
          if "error" in line and line.get("error"):
-@@ -1090,33 +3134,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1090,33 +3175,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      @classmethod
      async def nodriver_auth(cls, proxy: str = None):
          async with get_nodriver_session(proxy=proxy) as browser:
@@ -2816,7 +2857,7 @@ index 36d75ec..3c90f7c 100644
                      )
  
              await page.send(nodriver.cdp.network.enable())
-@@ -1124,29 +3171,31 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1124,29 +3212,31 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              await page.reload()
              user_agent = await page.evaluate("window.navigator.userAgent", return_by_value=True)
              debug.log(f"OpenaiChat: User-Agent: {user_agent}")
@@ -2871,7 +2912,7 @@ index 36d75ec..3c90f7c 100644
                  body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
                  if hasattr(body, "value"):
                      body = body.value
-@@ -1159,7 +3208,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1159,7 +3249,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      break
                  await asyncio.sleep(1)
                  debug.log("OpenaiChat: Waiting for access token...")
@@ -2882,7 +2923,7 @@ index 36d75ec..3c90f7c 100644
              #while True:
              #    if cls.request_config.proof_token:
              #        break
-@@ -1238,6 +3289,18 @@ class Conversation(JsonConversation):
+@@ -1238,6 +3330,18 @@ class Conversation(JsonConversation):
          self.prompt = None
          self.generated_images: ImagePreview = None
          self.task: dict = None
@@ -2901,7 +2942,7 @@ index 36d75ec..3c90f7c 100644
  
  
  def get_cookies(
-@@ -1254,7 +3317,7 @@ def get_cookies(
+@@ -1254,7 +3358,7 @@ def get_cookies(
      return {c["name"]: c["value"] for c in json['cookies']} if 'cookies' in json else {}
  
  
@@ -2910,7 +2951,7 @@ index 36d75ec..3c90f7c 100644
      list: List[Dict[str, str]]
  
      def __init__(self, sources: List[Dict[str, str]]) -> None:
-@@ -1294,8 +3357,7 @@ class OpenAISources(ResponseType):
+@@ -1294,8 +3398,7 @@ class OpenAISources(ResponseType):
          return "\n\n\n\n" + ("\n>\n".join([
              f"> [{idx + 1}] {format_link(link['url'], link.get('title', ''))}"
              for idx, link in enumerate(self.list)
@@ -2920,7 +2961,7 @@ index 36d75ec..3c90f7c 100644
      def get_ref_info(self, source: Dict[str, str]) -> dict[str, str | int] | None:
          ref_index = source.get("ref_id", {}).get("ref_index", None)
          ref_type = source.get("ref_id", {}).get("ref_type", None)
-@@ -1345,9 +3407,25 @@ class ContentReferences:
+@@ -1345,9 +3448,25 @@ class ContentReferences:
          self.list: List[Dict[str, Any]] = []
  
      def add_reference(self, reference_part: dict) -> None:
@@ -2947,7 +2988,7 @@ index 36d75ec..3c90f7c 100644
          while len(self.list) <= idx:
              self.list.append({})
  
-@@ -1357,25 +3435,34 @@ class ContentReferences:
+@@ -1357,25 +3476,34 @@ class ContentReferences:
          while len(self.list) <= idx:
              self.list.append({})
  
