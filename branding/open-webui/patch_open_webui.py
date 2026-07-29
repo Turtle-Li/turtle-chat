@@ -742,6 +742,7 @@ replace_once(
 from open_webui.turtle_auth.router import router as turtle_auth_router
 from open_webui.turtle_auth.service import public_registration_enabled
 from open_webui.turtle_chat.router import router as turtle_chat_router
+from open_webui.turtle_chat.startup_batch import ExistingChatWriteBatch
 from open_webui.turtle_project_api.router import (
     proxy_router as turtle_project_api_proxy_router,
     router as turtle_project_api_router,
@@ -1124,6 +1125,239 @@ replace_once(
             'task_ids': task_ids,
             'chat_id': chat_id,
         }
+""",
+)
+
+# Existing-chat startup used to rewrite the same authoritative JSON, normalized
+# message rows, and range index once for each adjacent graph change. Batch the
+# user message, links, and assistant placeholder under one row lock.
+replace_once(
+    main_path,
+    """                else:
+                    # Existing chat — verify ownership
+                    if not await Chats.is_chat_owner(chat_id, user.id) and user.role != 'admin':
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=ERROR_MESSAGES.DEFAULT(),
+                        )
+
+                    user_message = metadata.get('user_message') or {}
+""",
+    """                else:
+                    # Existing chat — verify ownership and prepare one atomic
+                    # foreground-turn write batch for Turtle Provider aliases.
+                    turtle_chat_batch = None
+                    if model_id in {'gpt-5-web', 'claude-web'}:
+                        turtle_existing_chat = await Chats.get_chat_by_id(chat_id)
+                        if (
+                            turtle_existing_chat is None
+                            or (
+                                str(turtle_existing_chat.user_id) != str(user.id)
+                                and user.role != 'admin'
+                            )
+                        ):
+                            raise HTTPException(
+                                status_code=status.HTTP_404_NOT_FOUND,
+                                detail=ERROR_MESSAGES.DEFAULT(),
+                            )
+                        turtle_chat_batch = ExistingChatWriteBatch(
+                            turtle_existing_chat,
+                            Chats.upsert_message_to_history,
+                        )
+                    elif not await Chats.is_chat_owner(chat_id, user.id) and user.role != 'admin':
+                        raise HTTPException(
+                            status_code=status.HTTP_404_NOT_FOUND,
+                            detail=ERROR_MESSAGES.DEFAULT(),
+                        )
+
+                    user_message = metadata.get('user_message') or {}
+""",
+)
+replace_once(
+    main_path,
+    """                    chat_files = metadata.get('files')
+                    if chat_files is not None or selected_chat_models:
+                        existing_chat = await Chats.get_chat_by_id(chat_id)
+                        if existing_chat:
+                            updated = {**existing_chat.chat}
+                            if chat_files is not None:
+                                updated['files'] = chat_files
+                            if selected_chat_models:
+                                updated['models'] = selected_chat_models
+                            await Chats.update_chat_by_id(chat_id, updated, touch=False)
+
+                    await Chats.update_chat_variables_by_id(chat_id, chat_variables)
+""",
+    """                    chat_files = metadata.get('files')
+                    if turtle_chat_batch is not None:
+                        turtle_chat_batch.update_chat_fields(
+                            files=chat_files,
+                            models=selected_chat_models,
+                        )
+                        turtle_chat_batch.update_variables(chat_variables)
+                    else:
+                        if chat_files is not None or selected_chat_models:
+                            existing_chat = await Chats.get_chat_by_id(chat_id)
+                            if existing_chat:
+                                updated = {**existing_chat.chat}
+                                if chat_files is not None:
+                                    updated['files'] = chat_files
+                                if selected_chat_models:
+                                    updated['models'] = selected_chat_models
+                                await Chats.update_chat_by_id(chat_id, updated, touch=False)
+
+                        await Chats.update_chat_variables_by_id(chat_id, chat_variables)
+""",
+)
+replace_once(
+    main_path,
+    """                    if user_message and user_message.get('id'):
+                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                            chat_id,
+                            user_message['id'],
+                            user_message,
+                        )
+                        await emit_chat_list_event({**metadata, 'message_id': user_message['id']}, chat_id)
+""",
+    """                    if user_message and user_message.get('id'):
+                        if turtle_chat_batch is not None:
+                            turtle_chat_batch.stage_message(
+                                user_message['id'],
+                                user_message,
+                            )
+                        else:
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                chat_id,
+                                user_message['id'],
+                                user_message,
+                            )
+                        await emit_chat_list_event({**metadata, 'message_id': user_message['id']}, chat_id)
+""",
+)
+
+replace_once(
+    main_path,
+    """                        grandparent_id = user_message.get('parentId')
+                        if grandparent_id:
+                            grandparent = await Chats.get_message_by_id_and_message_id(chat_id, grandparent_id)
+                            if grandparent:
+                                child_ids = grandparent.get('childrenIds', [])
+                                if user_message['id'] not in child_ids:
+                                    child_ids.append(user_message['id'])
+                                    await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                        chat_id, grandparent_id, {'childrenIds': child_ids}
+                                    )
+""",
+    """                        grandparent_id = user_message.get('parentId')
+                        if grandparent_id:
+                            grandparent = (
+                                turtle_chat_batch.get_message(grandparent_id)
+                                if turtle_chat_batch is not None
+                                else await Chats.get_message_by_id_and_message_id(
+                                    chat_id,
+                                    grandparent_id,
+                                )
+                            )
+                            if grandparent:
+                                child_ids = grandparent.get('childrenIds', [])
+                                if user_message['id'] not in child_ids:
+                                    child_ids.append(user_message['id'])
+                                    if turtle_chat_batch is not None:
+                                        turtle_chat_batch.stage_message(
+                                            grandparent_id,
+                                            {'childrenIds': child_ids},
+                                        )
+                                    else:
+                                        await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                            chat_id, grandparent_id, {'childrenIds': child_ids}
+                                        )
+""",
+)
+replace_once(
+    main_path,
+    """                    if user_message_id and all_assistant_ids:
+                        existing_user_message = await Chats.get_message_by_id_and_message_id(chat_id, user_message_id)
+                        if existing_user_message:
+                            child_ids = existing_user_message.get('childrenIds', [])
+                            for assistant_id in all_assistant_ids:
+                                if assistant_id not in child_ids:
+                                    child_ids.append(assistant_id)
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                chat_id,
+                                user_message_id,
+                                {'childrenIds': child_ids},
+                            )
+""",
+    """                    if user_message_id and all_assistant_ids:
+                        existing_user_message = (
+                            turtle_chat_batch.get_message(user_message_id)
+                            if turtle_chat_batch is not None
+                            else await Chats.get_message_by_id_and_message_id(
+                                chat_id,
+                                user_message_id,
+                            )
+                        )
+                        if existing_user_message:
+                            child_ids = existing_user_message.get('childrenIds', [])
+                            for assistant_id in all_assistant_ids:
+                                if assistant_id not in child_ids:
+                                    child_ids.append(assistant_id)
+                            if turtle_chat_batch is not None:
+                                turtle_chat_batch.stage_message(
+                                    user_message_id,
+                                    {'childrenIds': child_ids},
+                                )
+                            else:
+                                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                    chat_id,
+                                    user_message_id,
+                                    {'childrenIds': child_ids},
+                                )
+""",
+)
+replace_once(
+    main_path,
+    """                            if entry.get('modelIdx') is not None:
+                                assistant_message['modelIdx'] = entry['modelIdx']
+                            await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                chat_id,
+                                assistant_message_id,
+                                assistant_message,
+                            )
+                            await publish_event(
+""",
+    """                            if entry.get('modelIdx') is not None:
+                                assistant_message['modelIdx'] = entry['modelIdx']
+                            if turtle_chat_batch is not None:
+                                turtle_chat_batch.stage_message(
+                                    assistant_message_id,
+                                    assistant_message,
+                                )
+                            else:
+                                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                    chat_id,
+                                    assistant_message_id,
+                                    assistant_message,
+                                )
+                            await publish_event(
+""",
+)
+replace_once(
+    main_path,
+    """                                    'model': target_model_id,
+                                },
+                            )
+
+        request.state.metadata = metadata
+""",
+    """                                    'model': target_model_id,
+                                },
+                            )
+
+                    if turtle_chat_batch is not None:
+                        await turtle_chat_batch.commit()
+
+        request.state.metadata = metadata
 """,
 )
 
@@ -2524,7 +2758,11 @@ replace_once(
                     current_assistant_ids = {
                         entry.get('message_id') for entry in message_ids if entry.get('message_id')
                     }
-                    existing_messages = await Chats.get_messages_map_by_chat_id(chat_id) or {}
+                    existing_messages = (
+                        turtle_chat_batch.messages
+                        if turtle_chat_batch is not None
+                        else await Chats.get_messages_map_by_chat_id(chat_id) or {}
+                    )
                     for stale_message_id, stale_message in existing_messages.items():
                         if stale_message_id in current_assistant_ids or not isinstance(stale_message, dict):
                             continue
@@ -2535,11 +2773,17 @@ replace_once(
                             and not stale_message.get('output')
                             and not stale_message.get('error')
                         ):
-                            await Chats.upsert_message_to_chat_by_id_and_message_id(
-                                chat_id,
-                                stale_message_id,
-                                {'done': True},
-                            )
+                            if turtle_chat_batch is not None:
+                                turtle_chat_batch.stage_message(
+                                    stale_message_id,
+                                    {'done': True},
+                                )
+                            else:
+                                await Chats.upsert_message_to_chat_by_id_and_message_id(
+                                    chat_id,
+                                    stale_message_id,
+                                    {'done': True},
+                                )
 
                     selected_chat_models = user_message.get('models') if isinstance(user_message, dict) else None
 """,
