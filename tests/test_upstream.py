@@ -9,6 +9,7 @@ from chatgpt_web_gateway.upstream import (
     UpstreamClient,
     extract_upstream_media_metrics,
     extract_upstream_resource_metadata,
+    extract_upstream_stage_metrics,
 )
 
 
@@ -151,6 +152,15 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
                         "file_cache_hit": 1,
                         "file_cache_miss": 1,
                         "file_cache_stale": 0,
+                        "upload_wall_ms": 1420,
+                        "cache_validation_ms": 12,
+                        "probe_ms": 210,
+                        "create_ms": 180,
+                        "settle_ms": 1000,
+                        "transfer_ms": 350,
+                        "confirm_ms": 90,
+                        "configured_parallel": 3,
+                        "max_parallel": 2,
                         "source_url": "must be ignored",
                     }
                 }
@@ -161,6 +171,8 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
         self.assertEqual(metrics.cdn_hit, 1)
         self.assertEqual(metrics.retry_count, 1)
         self.assertEqual(metrics.file_cache_hit, 1)
+        self.assertEqual(metrics.upload_wall_ms, 1420)
+        self.assertEqual(metrics.max_parallel, 2)
 
     def test_rejects_invalid_media_counter_versions_and_values(self) -> None:
         invalid = extract_upstream_media_metrics(
@@ -169,6 +181,41 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
                     "turtle_media_metrics": {
                         "v": 2,
                         "transfer_bytes": -1,
+                    }
+                }
+            }
+        )
+        self.assertTrue(invalid.empty)
+
+    def test_extracts_only_bounded_upstream_stage_timings(self) -> None:
+        metrics = extract_upstream_stage_metrics(
+            {
+                "conversation": {
+                    "turtle_upstream_stage_metrics": {
+                        "v": 1,
+                        "home_ms": 0,
+                        "media_ms": 12_300,
+                        "prepare_ms": 240,
+                        "requirements_ms": 410,
+                        "submit_headers_ms": 90,
+                        "first_event_ms": 2_800,
+                        "pre_stream_ms": 15_900,
+                        "source_url": "must be ignored",
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(metrics.media_ms, 12_300)
+        self.assertEqual(metrics.first_event_ms, 2_800)
+        self.assertEqual(metrics.pre_stream_ms, 15_900)
+
+        invalid = extract_upstream_stage_metrics(
+            {
+                "conversation": {
+                    "turtle_upstream_stage_metrics": {
+                        "v": 1,
+                        "pre_stream_ms": 3_600_001,
                     }
                 }
             }

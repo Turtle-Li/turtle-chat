@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -105,6 +106,30 @@ class FakeSession:
     def post(self, _url, **_kwargs):
         self.post_count += 1
         return FakeResponse(self.post_payloads.pop(0))
+
+
+class ConcurrentFakeSession:
+    def __init__(self):
+        self.cookie_jar = []
+        self.create_count = 0
+        self.confirm_count = 0
+
+    def post(self, url, **kwargs):
+        if str(url).endswith("/backend-api/files"):
+            self.create_count += 1
+            name = str((kwargs.get("json") or {}).get("file_name") or "file")
+            file_id = f"file_{hashlib.sha256(name.encode()).hexdigest()[:12]}"
+            return FakeResponse(
+                {
+                    "file_id": file_id,
+                    "upload_url": f"https://oaiusercontent.example/{file_id}",
+                }
+            )
+        self.confirm_count += 1
+        file_id = str(url).split("/files/", 1)[-1].split("/", 1)[0]
+        return FakeResponse(
+            {"download_url": f"https://oaiusercontent.example/{file_id}/download"}
+        )
 
 
 class FakeControlResponse:
@@ -340,6 +365,150 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.turtle_media_metrics["retry_count"], 2)
         self.assertEqual(conversation.turtle_media_metrics["transfer_bytes"], 4)
         self.assertNotIn(PRIVATE_INPUT_FILE_CACHE_ATTR, conversation.get_dict())
+
+    async def test_managed_uploads_use_bounded_concurrency_and_preserve_order(self):
+        sources = [
+            ModelMediaSource(
+                "https://files.chat.totools.cn/"
+                f"turtle-gpt/files/users/user-a/image-{index}.png",
+                media_id=f"{index:064x}",
+            )
+            for index in range(3)
+        ]
+        conversation = Conversation(user_id=None)
+        session = ConcurrentFakeSession()
+        state = {"active": 0, "maximum": 0}
+        release = asyncio.Event()
+
+        async def transfer(**_kwargs):
+            state["active"] += 1
+            state["maximum"] = max(state["maximum"], state["active"])
+            if state["active"] == 2:
+                release.set()
+            try:
+                await asyncio.wait_for(release.wait(), timeout=1)
+                await asyncio.sleep(0)
+                return {
+                    "size": 4,
+                    "source": "primary",
+                    "cdn_cache": "hit",
+                    "retry_count": 0,
+                }
+            finally:
+                state["active"] -= 1
+
+        probe = {
+            "size": 4,
+            "content_type": "image/png",
+            "max_bytes": 1024,
+            "width": 1,
+            "height": 1,
+            "source": "primary",
+            "cdn_cache": "hit",
+            "retry_count": 0,
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {"TURTLE_MEDIA_UPLOAD_CONCURRENCY": "2"},
+                clear=False,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.probe_media",
+                new=AsyncMock(return_value=probe),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=transfer,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            uploaded = await OpenaiChat.upload_files(
+                session,
+                self.auth,
+                [
+                    (source, f"image-{index}.png")
+                    for index, source in enumerate(sources)
+                ],
+                conversation,
+            )
+
+        self.assertEqual(
+            [item.get("file_name") for item in uploaded],
+            ["image-0.png", "image-1.png", "image-2.png"],
+        )
+        self.assertEqual(state["maximum"], 2)
+        self.assertEqual(session.create_count, 3)
+        self.assertEqual(session.confirm_count, 3)
+        self.assertEqual(
+            conversation.turtle_media_metrics["configured_parallel"],
+            2,
+        )
+        self.assertEqual(conversation.turtle_media_metrics["max_parallel"], 2)
+
+    async def test_duplicate_managed_sources_share_one_in_flight_upload(self):
+        source = ModelMediaSource(
+            "https://files.chat.totools.cn/"
+            "turtle-gpt/files/users/user-a/duplicate.png",
+            media_id="a" * 64,
+        )
+        conversation = Conversation(user_id=None)
+        session = ConcurrentFakeSession()
+        probe = AsyncMock(
+            return_value={
+                "size": 4,
+                "content_type": "image/png",
+                "max_bytes": 1024,
+                "source": "primary",
+                "cdn_cache": "hit",
+                "retry_count": 0,
+            }
+        )
+        transfer = AsyncMock(
+            return_value={
+                "size": 4,
+                "source": "primary",
+                "cdn_cache": "hit",
+                "retry_count": 0,
+            }
+        )
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.probe_media",
+                new=probe,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=transfer,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            uploaded = await OpenaiChat.upload_files(
+                session,
+                self.auth,
+                [(source, "duplicate.png"), (source, "duplicate.png")],
+                conversation,
+            )
+
+        self.assertEqual(len(uploaded), 2)
+        self.assertEqual(uploaded[0].get("file_id"), uploaded[1].get("file_id"))
+        self.assertEqual(probe.await_count, 1)
+        self.assertEqual(transfer.await_count, 1)
+        self.assertEqual(session.create_count, 1)
 
     def test_private_cache_key_ignores_signed_query_and_envelope_identity(self):
         first = ModelMediaSource(

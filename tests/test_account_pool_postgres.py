@@ -9,6 +9,7 @@ from chatgpt_web_gateway.account_pool import (
     AccountPoolConflict,
     PostgresAccountStore,
     _new_account,
+    _now,
 )
 
 
@@ -195,6 +196,69 @@ class PostgresAccountStoreTests(unittest.TestCase):
         self.assertEqual(lanes["latest:medium"]["state"], "cooldown")
         self.assertTrue(lanes["latest:high"]["available"])
         self.assertEqual(snapshot["pools"][0]["sticky_chat_count"], 2)
+
+        with self.store._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE chat_account_lane_state
+                   SET blocked_until = %s
+                 WHERE account_id = %s AND selection_key = %s
+                """,
+                (_now() - 1, other.id, "latest:medium"),
+            )
+            connection.commit()
+
+        still_isolated = self.store.snapshot()
+        isolated = next(
+            item for item in still_isolated["accounts"] if item["id"] == other.id
+        )
+        isolated_lane = next(
+            item
+            for item in isolated["quota"]["lanes"]
+            if item["selection_key"] == "latest:medium"
+        )
+        self.assertEqual(isolated_lane["state"], "cooldown")
+        self.assertFalse(isolated_lane["available"])
+
+        recoveries = self.store.claim_rate_limit_recoveries(
+            limit=1,
+            claim_seconds=60,
+        )
+        self.assertEqual(len(recoveries), 1)
+        recovery = recoveries[0]
+        self.assertEqual(recovery.account_id, other.id)
+        self.assertEqual(recovery.selection_key, "latest:medium")
+        claimed = self.store.snapshot()
+        claimed_account = next(
+            item for item in claimed["accounts"] if item["id"] == other.id
+        )
+        self.assertEqual(claimed_account["active"], 1)
+        claimed_lane = next(
+            item
+            for item in claimed_account["quota"]["lanes"]
+            if item["selection_key"] == "latest:medium"
+        )
+        self.assertFalse(claimed_lane["available"])
+
+        self.store.release(
+            recovery.request_id,
+            recovery.account_id,
+            outcome="success",
+            status_code=200,
+            error_class=None,
+            cooldown_seconds=30,
+        )
+        recovered = self.store.snapshot()
+        recovered_account = next(
+            item for item in recovered["accounts"] if item["id"] == other.id
+        )
+        self.assertEqual(recovered_account["active"], 0)
+        recovered_lane = next(
+            item
+            for item in recovered_account["quota"]["lanes"]
+            if item["selection_key"] == "latest:medium"
+        )
+        self.assertTrue(recovered_lane["available"])
 
     def test_delete_pool_rejects_accounts_and_policy_references(self) -> None:
         empty = self.store.create_pool(

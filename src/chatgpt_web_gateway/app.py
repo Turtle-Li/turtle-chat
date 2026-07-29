@@ -71,8 +71,10 @@ from .upstream import (
     UpstreamFailure,
     UpstreamMediaMetrics,
     UpstreamResourceMetadata,
+    UpstreamStageMetrics,
     extract_upstream_media_metrics,
     extract_upstream_resource_metadata,
+    extract_upstream_stage_metrics,
     normalize_markdown_boundaries,
     normalize_sse_events,
 )
@@ -161,7 +163,7 @@ def _log_upstream_media_metrics(
     if metrics.empty:
         return
     logger.info(
-        "request_media id=%s probe=%d transfer=%d bytes=%d cdn_hit=%d cdn_miss=%d fallback=%d retry=%d file_reuse=%d file_upload=%d file_stale=%d",
+        "request_media id=%s probe=%d transfer=%d bytes=%d cdn_hit=%d cdn_miss=%d fallback=%d retry=%d file_reuse=%d file_upload=%d file_stale=%d wall_ms=%d cache_ms=%d probe_ms=%d create_ms=%d settle_ms=%d transfer_ms=%d confirm_ms=%d parallel=%d/%d",
         request_id,
         metrics.probe_count,
         metrics.transfer_count,
@@ -173,6 +175,34 @@ def _log_upstream_media_metrics(
         metrics.file_cache_hit,
         metrics.file_cache_miss,
         metrics.file_cache_stale,
+        metrics.upload_wall_ms,
+        metrics.cache_validation_ms,
+        metrics.probe_ms,
+        metrics.create_ms,
+        metrics.settle_ms,
+        metrics.transfer_ms,
+        metrics.confirm_ms,
+        metrics.max_parallel,
+        metrics.configured_parallel,
+    )
+
+
+def _log_upstream_stage_metrics(
+    request_id: str,
+    metrics: UpstreamStageMetrics,
+) -> None:
+    if metrics.empty:
+        return
+    logger.info(
+        "request_upstream_stage id=%s home_ms=%d media_ms=%d prepare_ms=%d requirements_ms=%d submit_headers_ms=%d first_event_ms=%d pre_stream_ms=%d",
+        request_id,
+        metrics.home_ms,
+        metrics.media_ms,
+        metrics.prepare_ms,
+        metrics.requirements_ms,
+        metrics.submit_headers_ms,
+        metrics.first_event_ms,
+        metrics.pre_stream_ms,
     )
 
 
@@ -436,6 +466,7 @@ def create_app(
             upstream_timeout_seconds=resolved.upstream_timeout_seconds,
             lease_seconds=resolved.account_lease_seconds,
             cooldown_seconds=resolved.account_cooldown_seconds,
+            recovery_poll_seconds=resolved.account_recovery_poll_seconds,
             allowed_hosts=resolved.account_allowed_hosts,
             transport=upstream_transport,
         )
@@ -1736,6 +1767,10 @@ def create_app(
                         request_id,
                         extract_upstream_media_metrics(result),
                     )
+                    _log_upstream_stage_metrics(
+                        request_id,
+                        extract_upstream_stage_metrics(result),
+                    )
                     await request.app.state.upstream_cleanup.record(
                         account_id=account_lease.account.id,
                         pool_id=account_lease.account.pool_id,
@@ -1869,6 +1904,7 @@ def create_app(
             tracked_input_file_ids: set[str] = set()
             tracked_generated_asset_ids: set[str] = set()
             tracked_media_metrics = UpstreamMediaMetrics()
+            tracked_stage_metrics = UpstreamStageMetrics()
             reported_usage_payload: dict[str, Any] | None = None
             estimated_stream_completion_tokens = 0
 
@@ -1883,6 +1919,7 @@ def create_app(
                     return
                 finalized = True
                 _log_upstream_media_metrics(request_id, tracked_media_metrics)
+                _log_upstream_stage_metrics(request_id, tracked_stage_metrics)
                 if provider == "gpt":
                     try:
                         await request.app.state.upstream_cleanup.record(
@@ -1946,6 +1983,9 @@ def create_app(
                         current_media_metrics = extract_upstream_media_metrics(data)
                         if not current_media_metrics.empty:
                             tracked_media_metrics = current_media_metrics
+                        current_stage_metrics = extract_upstream_stage_metrics(data)
+                        if not current_stage_metrics.empty:
+                            tracked_stage_metrics = current_stage_metrics
                         tracked_conversation_id = (
                             metadata.conversation_id
                             or tracked_conversation_id

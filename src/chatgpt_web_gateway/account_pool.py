@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 import httpx
+from claude_web_worker.models import CLAUDE_PUBLIC_MODEL, ROUTE_BY_KEY
 
 from .account_quota import (
     ACCOUNT_QUOTA_PROFILES,
@@ -29,7 +30,12 @@ from .account_quota import (
     selection_keys,
     selection_label,
 )
-from .upstream import UpstreamClient
+from .capabilities import GPT_PUBLIC_MODEL, resolve_selection
+from .upstream import (
+    UpstreamClient,
+    UpstreamFailure,
+    extract_upstream_resource_metadata,
+)
 
 
 logger = logging.getLogger("uvicorn.error")
@@ -66,6 +72,13 @@ class UpstreamAccount:
     worker_endpoint: str
     health_path: str | None
     max_concurrency: int
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitRecoveryLease:
+    request_id: str
+    account_id: str
+    selection_key: str
 
 
 @dataclass(slots=True)
@@ -178,6 +191,13 @@ class AccountStore(Protocol):
         lease_seconds: int,
     ) -> bool: ...
 
+    def claim_rate_limit_recoveries(
+        self,
+        *,
+        limit: int,
+        claim_seconds: int,
+    ) -> list[RateLimitRecoveryLease]: ...
+
     def mark_probe(
         self,
         account_id: str,
@@ -270,6 +290,92 @@ def _quota_usage(
     }
 
 
+def _lane_rate_limit_cooldown_seconds(
+    account: dict[str, Any],
+    selection_key: str,
+    *,
+    failures: int,
+    cooldown_seconds: int,
+) -> int:
+    """Back off dynamic upstream limits without using users as frequent probes."""
+    lane = quota_lane(
+        account.get("quota_profile"),
+        selection_key,
+        str(account.get("provider") or "gpt"),
+    )
+    if lane.get("source") in {"official_dynamic", "official_multiplier"}:
+        published_window = max(
+            15 * 60,
+            int(lane.get("published_window_seconds") or 60 * 60),
+        )
+        cap = min(5 * 60 * 60, published_window)
+        exponential = 15 * 60 * (2 ** min(max(0, failures - 1), 5))
+        return min(cap, max(cooldown_seconds, exponential))
+    return min(
+        15 * 60,
+        max(cooldown_seconds, 15 * (2 ** min(failures, 5))),
+    )
+
+
+def _rate_limit_recovery_payload(
+    provider: str,
+    selection_key: str,
+) -> dict[str, Any]:
+    version, separator, level = selection_key.partition(":")
+    if not separator or not version or not level:
+        raise AccountPoolConflict("账号恢复探测档位无效")
+    if provider == "claude":
+        route = ROUTE_BY_KEY.get(selection_key)
+        if route is None:
+            raise AccountPoolConflict("Claude 恢复探测档位无效")
+        return {
+            "model": CLAUDE_PUBLIC_MODEL,
+            "messages": [{"role": "user", "content": "Reply only: OK"}],
+            "stream": False,
+            "web_search": False,
+            "turtle_claude_model": route.version,
+            "turtle_claude_thinking": route.level,
+        }
+    upstream_model, reasoning_effort = resolve_selection(
+        public_model_name=GPT_PUBLIC_MODEL,
+        default_upstream_model="auto",
+        version=version,
+        thinking_level=level,
+    )
+    return {
+        "model": upstream_model,
+        "messages": [{"role": "user", "content": "Reply only: OK"}],
+        "stream": False,
+        "temporary": True,
+        **(
+            {"reasoning_effort": reasoning_effort}
+            if reasoning_effort is not None
+            else {}
+        ),
+    }
+
+
+def _completion_has_effective_content(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        return any(
+            isinstance(item, dict)
+            and isinstance(item.get("text"), str)
+            and bool(item["text"].strip())
+            for item in content
+        )
+    return False
+
+
 def _lane_snapshot(
     account: dict[str, Any],
     selection_key: str,
@@ -286,7 +392,10 @@ def _lane_snapshot(
     budget = lane.get("dispatch_budget_count")
     reserve = max(0, int(lane.get("reserve_count") or 0))
     enabled = bool(lane.get("enabled"))
-    blocked = bool(blocked_until and int(blocked_until) > now)
+    # A lane-level 429 remains excluded until a background probe explicitly
+    # clears its durable row. ``blocked_until`` is the next probe time, not an
+    # automatic user-scheduling recovery time.
+    blocked = blocked_until is not None
     remaining = None if budget is None else max(0, int(budget) - used - active)
     safe_remaining = None if remaining is None else max(0, remaining - reserve)
     reset_at = None
@@ -584,10 +693,6 @@ class MemoryAccountStore:
                 account["health_status"] = "unknown"
                 account["cooldown_until"] = None
                 account["updated_at"] = now
-        for key, block in list(self.lane_blocks.items()):
-            if int(block.get("blocked_until") or 0) <= now:
-                self.lane_blocks.pop(key, None)
-
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             now = _now()
@@ -847,10 +952,18 @@ class MemoryAccountStore:
                     "account_id": account_id,
                     "selection_key": selection_key,
                     "blocked_until": now
-                    + min(15 * 60, max(cooldown_seconds, 15 * (2 ** min(failures, 5)))),
+                    + _lane_rate_limit_cooldown_seconds(
+                        account,
+                        selection_key,
+                        failures=failures,
+                        cooldown_seconds=cooldown_seconds,
+                    ),
                     "last_rate_limit_at": now,
                     "consecutive_failures": failures,
                 }
+            elif outcome == "success":
+                selection_key = str(lease.get("selection_key") or "latest:medium")
+                self.lane_blocks.pop((account_id, selection_key), None)
             _apply_account_result(
                 account,
                 outcome=outcome,
@@ -879,6 +992,74 @@ class MemoryAccountStore:
                 return False
             lease["expires_at"] = now + lease_seconds
             return True
+
+    def claim_rate_limit_recoveries(
+        self,
+        *,
+        limit: int,
+        claim_seconds: int,
+    ) -> list[RateLimitRecoveryLease]:
+        with self._lock:
+            now = _now()
+            self._expire(now)
+            claimed: list[RateLimitRecoveryLease] = []
+            due = sorted(
+                (
+                    (key, block)
+                    for key, block in self.lane_blocks.items()
+                    if int(block.get("blocked_until") or 0) <= now
+                ),
+                key=lambda item: (
+                    int(item[1].get("blocked_until") or 0),
+                    item[0],
+                ),
+            )
+            for (account_id, selection_key), block in due:
+                if len(claimed) >= max(1, int(limit)):
+                    break
+                account = self.accounts.get(account_id)
+                if (
+                    not account
+                    or not bool(account.get("enabled"))
+                    or account.get("status") != "ready"
+                    or account.get("session_state") != "valid"
+                    or account.get("health_status") not in {"unknown", "healthy"}
+                ):
+                    continue
+                active = sum(
+                    1
+                    for lease in self.leases.values()
+                    if lease["account_id"] == account_id
+                    and lease["state"] == "active"
+                    and int(lease["expires_at"]) > now
+                )
+                if active >= int(account.get("max_concurrency") or 1):
+                    continue
+                request_id = f"recovery-{uuid.uuid4().hex[:24]}"
+                self.leases[request_id] = {
+                    "request_id": request_id,
+                    "account_id": account_id,
+                    "pool_id": account["pool_id"],
+                    "user_id": None,
+                    "chat_id": None,
+                    "selection_key": selection_key,
+                    "state": "active",
+                    "leased_at": now,
+                    "expires_at": now + max(1, int(claim_seconds)),
+                    "completed_at": None,
+                    "outcome": None,
+                    "error_class": None,
+                }
+                block["blocked_until"] = now + max(1, int(claim_seconds))
+                block["updated_at"] = now
+                claimed.append(
+                    RateLimitRecoveryLease(
+                        request_id=request_id,
+                        account_id=account_id,
+                        selection_key=selection_key,
+                    )
+                )
+            return claimed
 
     def mark_probe(
         self,
@@ -1451,10 +1632,6 @@ class PostgresAccountStore:
             (now, now),
         )
         cursor.execute(
-            "DELETE FROM chat_account_lane_state WHERE blocked_until IS NOT NULL AND blocked_until <= %s",
-            (now,),
-        )
-        cursor.execute(
             """
             UPDATE chat_account
                SET status = CASE
@@ -1887,6 +2064,18 @@ class PostgresAccountStore:
                     )
                     cursor.execute(
                         """
+                        SELECT a.*, p.provider
+                          FROM chat_account a
+                          JOIN chat_account_pool p ON p.id = a.pool_id
+                         WHERE a.id = %s
+                         FOR UPDATE OF a
+                        """,
+                        (account_id,),
+                    )
+                    account_row = cursor.fetchone()
+                    account_for_cooldown = dict(account_row) if account_row else {}
+                    cursor.execute(
+                        """
                         SELECT consecutive_failures
                           FROM chat_account_lane_state
                          WHERE account_id = %s AND selection_key = %s
@@ -1896,9 +2085,11 @@ class PostgresAccountStore:
                     )
                     previous = cursor.fetchone()
                     failures = int(previous["consecutive_failures"] or 0) + 1 if previous else 1
-                    blocked_until = now + min(
-                        15 * 60,
-                        max(cooldown_seconds, 15 * (2 ** min(failures, 5))),
+                    blocked_until = now + _lane_rate_limit_cooldown_seconds(
+                        account_for_cooldown,
+                        selection_key,
+                        failures=failures,
+                        cooldown_seconds=cooldown_seconds,
                     )
                     cursor.execute(
                         """
@@ -1920,6 +2111,17 @@ class PostgresAccountStore:
                             failures,
                             now,
                         ),
+                    )
+                elif outcome == "success":
+                    selection_key = str(
+                        (lease_row or {}).get("selection_key") or "latest:medium"
+                    )
+                    cursor.execute(
+                        """
+                        DELETE FROM chat_account_lane_state
+                         WHERE account_id = %s AND selection_key = %s
+                        """,
+                        (account_id, selection_key),
                     )
                 cursor.execute("SELECT * FROM chat_account WHERE id = %s FOR UPDATE", (account_id,))
                 row = cursor.fetchone()
@@ -1979,6 +2181,107 @@ class PostgresAccountStore:
                 renewed = cursor.rowcount == 1
             connection.commit()
         return renewed
+
+    def claim_rate_limit_recoveries(
+        self,
+        *,
+        limit: int,
+        claim_seconds: int,
+    ) -> list[RateLimitRecoveryLease]:
+        now = _now()
+        claimed: list[RateLimitRecoveryLease] = []
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._expire(cursor, now)
+                cursor.execute(
+                    """
+                    SELECT s.account_id, s.selection_key, a.pool_id
+                      FROM chat_account_lane_state s
+                      JOIN chat_account a ON a.id = s.account_id
+                     WHERE s.blocked_until IS NOT NULL
+                       AND s.blocked_until <= %s
+                       AND a.enabled
+                       AND a.status = 'ready'
+                       AND a.session_state = 'valid'
+                       AND a.health_status IN ('unknown', 'healthy')
+                     ORDER BY s.blocked_until, s.account_id, s.selection_key
+                     FOR UPDATE OF s SKIP LOCKED
+                     LIMIT %s
+                    """,
+                    (now, max(1, int(limit)) * 2),
+                )
+                due = [dict(row) for row in cursor.fetchall()]
+                for item in due:
+                    if len(claimed) >= max(1, int(limit)):
+                        break
+                    pool_id = str(item["pool_id"])
+                    account_id = str(item["account_id"])
+                    selection_key = str(item["selection_key"])
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"account-pool:{pool_id}",),
+                    )
+                    cursor.execute(
+                        """
+                        SELECT a.max_concurrency,
+                               COUNT(l.request_id)::INTEGER AS active
+                          FROM chat_account a
+                          LEFT JOIN chat_account_lease l
+                            ON l.account_id = a.id
+                           AND l.state = 'active'
+                           AND l.expires_at > %s
+                         WHERE a.id = %s
+                           AND a.enabled
+                           AND a.status = 'ready'
+                           AND a.session_state = 'valid'
+                           AND a.health_status IN ('unknown', 'healthy')
+                         GROUP BY a.max_concurrency
+                        """,
+                        (now, account_id),
+                    )
+                    capacity = cursor.fetchone()
+                    if (
+                        not capacity
+                        or int(capacity["active"]) >= int(capacity["max_concurrency"])
+                    ):
+                        continue
+                    request_id = f"recovery-{uuid.uuid4().hex[:24]}"
+                    expires_at = now + max(1, int(claim_seconds))
+                    cursor.execute(
+                        """
+                        INSERT INTO chat_account_lease
+                            (request_id, account_id, pool_id, user_id, chat_id,
+                             selection_key, state, leased_at, expires_at,
+                             completed_at, outcome, error_class)
+                        VALUES (%s, %s, %s, NULL, NULL, %s, 'active', %s, %s,
+                                NULL, NULL, NULL)
+                        """,
+                        (
+                            request_id,
+                            account_id,
+                            pool_id,
+                            selection_key,
+                            now,
+                            expires_at,
+                        ),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE chat_account_lane_state
+                           SET blocked_until = %s, updated_at = %s
+                         WHERE account_id = %s AND selection_key = %s
+                        """,
+                        (expires_at, now, account_id, selection_key),
+                    )
+                    claimed.append(
+                        RateLimitRecoveryLease(
+                            request_id=request_id,
+                            account_id=account_id,
+                            selection_key=selection_key,
+                        )
+                    )
+            connection.commit()
+        return claimed
 
     def mark_probe(
         self,
@@ -2378,6 +2681,8 @@ class AccountPoolRouter:
         default_accounts: list[dict[str, Any]] | None = None,
         default_account: dict[str, Any] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        recovery_poll_seconds: float = 0.0,
+        recovery_probe_concurrency: int = 2,
     ) -> None:
         self.store = store
         self.upstream_api_key = upstream_api_key
@@ -2398,13 +2703,29 @@ class AccountPoolRouter:
             str(item["pool_id"]) for item in self.default_accounts
         )
         self.transport = transport
+        self.recovery_poll_seconds = max(0.0, float(recovery_poll_seconds))
+        self.recovery_probe_concurrency = max(
+            1,
+            min(4, int(recovery_probe_concurrency)),
+        )
         self._clients: dict[str, tuple[str, str | None, UpstreamClient]] = {}
         self._client_lock = asyncio.Lock()
+        self._recovery_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         await asyncio.to_thread(self.store.initialize, self.default_accounts)
+        if self.recovery_poll_seconds > 0 and self._recovery_task is None:
+            self._recovery_task = asyncio.create_task(
+                self._rate_limit_recovery_loop()
+            )
 
     async def close(self) -> None:
+        recovery_task = self._recovery_task
+        self._recovery_task = None
+        if recovery_task is not None:
+            recovery_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await recovery_task
         clients = [value[2] for value in self._clients.values()]
         self._clients.clear()
         await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
@@ -2434,6 +2755,116 @@ class AccountPoolRouter:
             )
             self._clients[account.id] = (signature[0], signature[1], client)
             return client
+
+    async def _probe_rate_limit_recovery(
+        self,
+        claim: RateLimitRecoveryLease,
+    ) -> None:
+        started = time.monotonic()
+        status_code: int | None = None
+        outcome = "error"
+        error_class = "rate_limit_recovery"
+        account = await asyncio.to_thread(self.store.account, claim.account_id)
+        if account is None:
+            await asyncio.to_thread(
+                self.store.release,
+                claim.request_id,
+                claim.account_id,
+                outcome="error",
+                status_code=502,
+                error_class="rate_limit_recovery_missing_account",
+                cooldown_seconds=self.cooldown_seconds,
+            )
+            return
+        try:
+            client = await self.client_for(account)
+            result = await client.completion(
+                _rate_limit_recovery_payload(
+                    account.provider,
+                    claim.selection_key,
+                )
+            )
+            if not _completion_has_effective_content(result):
+                status_code = 502
+                error_class = "rate_limit_recovery_empty"
+            else:
+                status_code = 200
+                outcome = "success"
+                error_class = None
+                if account.provider == "gpt":
+                    metadata = extract_upstream_resource_metadata(result)
+                    if metadata.conversation_id:
+                        try:
+                            await client.cleanup_resource(
+                                resource_type="conversation",
+                                resource_id=metadata.conversation_id,
+                                dry_run=False,
+                                conversation_action="delete",
+                            )
+                        except Exception:
+                            logger.warning(
+                                "account_recovery_cleanup_failed account=%s lane=%s",
+                                account.id,
+                                claim.selection_key,
+                            )
+        except asyncio.CancelledError:
+            await asyncio.to_thread(
+                self.store.release,
+                claim.request_id,
+                claim.account_id,
+                outcome="cancelled",
+                status_code=499,
+                error_class="rate_limit_recovery_cancelled",
+                cooldown_seconds=self.cooldown_seconds,
+            )
+            raise
+        except UpstreamFailure as exc:
+            status_code = exc.status_code
+        except Exception:
+            status_code = 502
+        await asyncio.to_thread(
+            self.store.release,
+            claim.request_id,
+            claim.account_id,
+            outcome=outcome,
+            status_code=status_code,
+            error_class=error_class,
+            cooldown_seconds=self.cooldown_seconds,
+        )
+        logger.info(
+            "account_recovery_probe account=%s lane=%s recovered=%s status=%s latency_ms=%d",
+            account.id,
+            claim.selection_key,
+            outcome == "success",
+            status_code,
+            int((time.monotonic() - started) * 1000),
+        )
+
+    async def _rate_limit_recovery_loop(self) -> None:
+        semaphore = asyncio.Semaphore(self.recovery_probe_concurrency)
+
+        async def bounded_probe(claim: RateLimitRecoveryLease) -> None:
+            async with semaphore:
+                await self._probe_rate_limit_recovery(claim)
+
+        claim_seconds = max(60, int(self.upstream_timeout_seconds) + 60)
+        while True:
+            try:
+                claims = await asyncio.to_thread(
+                    self.store.claim_rate_limit_recoveries,
+                    limit=self.recovery_probe_concurrency,
+                    claim_seconds=claim_seconds,
+                )
+                if claims:
+                    await asyncio.gather(
+                        *(bounded_probe(claim) for claim in claims)
+                    )
+                await asyncio.sleep(self.recovery_poll_seconds)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("account_recovery_monitor_failed")
+                await asyncio.sleep(self.recovery_poll_seconds)
 
     async def acquire(
         self,
@@ -2874,6 +3305,7 @@ def build_account_pool(
     upstream_timeout_seconds: float,
     lease_seconds: int,
     cooldown_seconds: int,
+    recovery_poll_seconds: float,
     allowed_hosts: tuple[str, ...],
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> AccountPoolRouter:
@@ -2922,4 +3354,5 @@ def build_account_pool(
         allowed_hosts=allowed_hosts,
         default_accounts=default_accounts,
         transport=transport,
+        recovery_poll_seconds=recovery_poll_seconds,
     )

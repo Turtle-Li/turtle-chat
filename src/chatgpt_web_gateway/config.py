@@ -122,6 +122,7 @@ class Settings:
     default_claude_account_pool_id: str = "claude-default"
     account_lease_seconds: int = 1200
     account_cooldown_seconds: int = 300
+    account_recovery_poll_seconds: int = 30
     account_failover_max_attempts: int = 3
     upstream_cleanup_enabled: bool = False
     upstream_cleanup_execute: bool = False
@@ -242,6 +243,12 @@ class Settings:
             ),
             account_cooldown_seconds=int(
                 _positive_float("GATEWAY_ACCOUNT_COOLDOWN_SECONDS", 300.0)
+            ),
+            account_recovery_poll_seconds=_bounded_int(
+                "GATEWAY_ACCOUNT_RECOVERY_POLL_SECONDS",
+                30,
+                minimum=5,
+                maximum=300,
             ),
             account_failover_max_attempts=_bounded_int(
                 "GATEWAY_ACCOUNT_FAILOVER_MAX_ATTEMPTS",

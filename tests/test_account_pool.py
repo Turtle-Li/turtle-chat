@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 import httpx
@@ -594,6 +595,135 @@ class AccountPoolRouterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(other_lane.account.id, "acct-a")
         await other_lane.release(outcome="success", status_code=200)
+
+    async def test_rate_limited_lane_recovers_only_after_background_completion(
+        self,
+    ) -> None:
+        observed_payloads: list[dict] = []
+        recovery = {"available": False}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/healthz":
+                return httpx.Response(200, json={"ok": True})
+            if request.url.path == "/v1/chat/completions":
+                observed_payloads.append(json.loads(request.content))
+                if not recovery["available"]:
+                    return httpx.Response(
+                        429,
+                        json={"error": {"message": "rate limited"}},
+                    )
+                return httpx.Response(
+                    200,
+                    json={
+                        "choices": [
+                            {
+                                "message": {"role": "assistant", "content": "OK"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "conversation": {
+                            "conversation_id": "conversation_recovery_1234"
+                        },
+                    },
+                )
+            if request.url.path == "/api/OpenaiAccount/turtle/cleanup":
+                return httpx.Response(
+                    200,
+                    json={"ok": True, "dry_run": False, "http_status": 204},
+                )
+            return httpx.Response(404)
+
+        store = MemoryAccountStore()
+        free_account = _new_account(
+            "acct-free",
+            pool_id="gpt-default",
+            name="Free",
+            worker_endpoint="http://worker.test:8323/v1",
+            health_path="/healthz",
+            max_concurrency=1,
+            priority=10,
+            quota_profile="free",
+            deployment_managed=True,
+        )
+        router = AccountPoolRouter(
+            store=store,
+            upstream_api_key="test-key",
+            upstream_timeout_seconds=10,
+            lease_seconds=60,
+            cooldown_seconds=30,
+            allowed_hosts=("worker.test",),
+            default_account=free_account,
+            transport=httpx.MockTransport(handler),
+        )
+        await router.start()
+        try:
+            lease = await router.acquire(
+                pool_id="gpt-default",
+                request_id="request-free-limit",
+                user_id="user-a",
+                chat_id="chat-free-limit",
+                selection_key="gpt-5-5:instant",
+            )
+            await lease.release(
+                outcome="error",
+                status_code=429,
+                error_class="upstream_request",
+            )
+            block_key = ("acct-free", "gpt-5-5:instant")
+            self.assertIn(block_key, store.lane_blocks)
+            store.lane_blocks[block_key]["blocked_until"] = _now() - 1
+
+            lane = next(
+                item
+                for item in (await router.snapshot())["accounts"][0]["quota"]["lanes"]
+                if item["selection_key"] == "gpt-5-5:instant"
+            )
+            self.assertEqual(lane["state"], "cooldown")
+            with self.assertRaises(AccountUnavailable):
+                await router.acquire(
+                    pool_id="gpt-default",
+                    request_id="request-user-must-not-probe",
+                    user_id="user-b",
+                    chat_id="chat-user-must-not-probe",
+                    selection_key="gpt-5-5:instant",
+                )
+
+            failed_claim = store.claim_rate_limit_recoveries(
+                limit=1,
+                claim_seconds=60,
+            )[0]
+            await router._probe_rate_limit_recovery(failed_claim)
+            self.assertIn(block_key, store.lane_blocks)
+            self.assertEqual(
+                store.lane_blocks[block_key]["consecutive_failures"],
+                2,
+            )
+
+            store.lane_blocks[block_key]["blocked_until"] = _now() - 1
+            recovery["available"] = True
+            successful_claim = store.claim_rate_limit_recoveries(
+                limit=1,
+                claim_seconds=60,
+            )[0]
+            await router._probe_rate_limit_recovery(successful_claim)
+            self.assertNotIn(block_key, store.lane_blocks)
+
+            recovered = await router.acquire(
+                pool_id="gpt-default",
+                request_id="request-after-monitor-recovery",
+                user_id="user-c",
+                chat_id="chat-after-monitor-recovery",
+                selection_key="gpt-5-5:instant",
+            )
+            await recovered.release(outcome="success", status_code=200)
+        finally:
+            await router.close()
+
+        self.assertEqual(len(observed_payloads), 2)
+        self.assertTrue(all(item.get("temporary") is True for item in observed_payloads))
+        self.assertTrue(
+            all(item.get("model") == "gpt-5-5-instant" for item in observed_payloads)
+        )
 
     async def test_outer_capacity_is_scoped_to_the_requested_lane(self) -> None:
         current = self.store.accounts["acct-a"]

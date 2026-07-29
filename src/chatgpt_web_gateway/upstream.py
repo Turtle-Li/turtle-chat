@@ -48,6 +48,15 @@ class UpstreamMediaMetrics:
     file_cache_hit: int = 0
     file_cache_miss: int = 0
     file_cache_stale: int = 0
+    upload_wall_ms: int = 0
+    cache_validation_ms: int = 0
+    probe_ms: int = 0
+    create_ms: int = 0
+    settle_ms: int = 0
+    transfer_ms: int = 0
+    confirm_ms: int = 0
+    configured_parallel: int = 0
+    max_parallel: int = 0
 
     @property
     def empty(self) -> bool:
@@ -63,6 +72,40 @@ class UpstreamMediaMetrics:
                 self.file_cache_hit,
                 self.file_cache_miss,
                 self.file_cache_stale,
+                self.upload_wall_ms,
+                self.cache_validation_ms,
+                self.probe_ms,
+                self.create_ms,
+                self.settle_ms,
+                self.transfer_ms,
+                self.confirm_ms,
+                self.configured_parallel,
+                self.max_parallel,
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class UpstreamStageMetrics:
+    home_ms: int = 0
+    media_ms: int = 0
+    prepare_ms: int = 0
+    requirements_ms: int = 0
+    submit_headers_ms: int = 0
+    first_event_ms: int = 0
+    pre_stream_ms: int = 0
+
+    @property
+    def empty(self) -> bool:
+        return not any(
+            (
+                self.home_ms,
+                self.media_ms,
+                self.prepare_ms,
+                self.requirements_ms,
+                self.submit_headers_ms,
+                self.first_event_ms,
+                self.pre_stream_ms,
             )
         )
 
@@ -632,6 +675,56 @@ def extract_upstream_media_metrics(
         file_cache_hit=counter("file_cache_hit", 10_000),
         file_cache_miss=counter("file_cache_miss", 10_000),
         file_cache_stale=counter("file_cache_stale", 10_000),
+        upload_wall_ms=counter("upload_wall_ms", 3_600_000),
+        cache_validation_ms=counter("cache_validation_ms", 3_600_000),
+        probe_ms=counter("probe_ms", 3_600_000),
+        create_ms=counter("create_ms", 3_600_000),
+        settle_ms=counter("settle_ms", 3_600_000),
+        transfer_ms=counter("transfer_ms", 3_600_000),
+        confirm_ms=counter("confirm_ms", 3_600_000),
+        configured_parallel=counter("configured_parallel", 4),
+        max_parallel=counter("max_parallel", 4),
+    )
+
+
+def extract_upstream_stage_metrics(
+    value: dict[str, Any] | str,
+) -> UpstreamStageMetrics:
+    """Extract bounded stage timings without retaining upstream payload data."""
+    if isinstance(value, str):
+        if value == "[DONE]":
+            return UpstreamStageMetrics()
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return UpstreamStageMetrics()
+    else:
+        payload = value
+    if not isinstance(payload, dict):
+        return UpstreamStageMetrics()
+    conversation = payload.get("conversation")
+    if not isinstance(conversation, dict):
+        return UpstreamStageMetrics()
+    metrics = conversation.get("turtle_upstream_stage_metrics")
+    if not isinstance(metrics, dict) or metrics.get("v") != 1:
+        return UpstreamStageMetrics()
+
+    def timing(name: str) -> int:
+        candidate = metrics.get(name)
+        return (
+            candidate
+            if isinstance(candidate, int) and 0 <= candidate <= 3_600_000
+            else 0
+        )
+
+    return UpstreamStageMetrics(
+        home_ms=timing("home_ms"),
+        media_ms=timing("media_ms"),
+        prepare_ms=timing("prepare_ms"),
+        requirements_ms=timing("requirements_ms"),
+        submit_headers_ms=timing("submit_headers_ms"),
+        first_event_ms=timing("first_event_ms"),
+        pre_stream_ms=timing("pre_stream_ms"),
     )
 
 

@@ -399,14 +399,27 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert '+                        f"{cls.url}/backend-api/files/{cached[\'file_id\']}/download",' in overlay
     assert '+                                metrics["file_cache_hit"] += 1' in overlay
     assert '+                transfer = await transfer_media(' in overlay
+    assert '+        semaphore = asyncio.Semaphore(configured_parallel)' in overlay
+    assert "+            results = await asyncio.gather(" in overlay
+    assert '+        "configured_parallel": 0,' in overlay
+    assert '+        "max_parallel": 0,' in overlay
     assert '+            conversation.turtle_media_metrics = _new_media_metrics()' in overlay
+    assert (
+        "+            conversation.turtle_upstream_stage_metrics = "
+        "_new_upstream_stage_metrics()"
+    ) in overlay
     assert "+        self.turtle_media_metrics = _new_media_metrics()" in overlay
+    assert (
+        "+        self.turtle_upstream_stage_metrics = "
+        "_new_upstream_stage_metrics()"
+    ) in overlay
     assert "+                remember_conversation(first_chunk)" in overlay
     assert "+                    if not isinstance(first_chunk, BaseConversation):" in overlay
     assert "+        self.turtle_input_file_caches: dict[str, dict[str, dict]] = {}" in overlay
     assert '+                    and re.fullmatch(r"turtle-v1-[0-9a-f]{64}", config.conversation_id)' in overlay
     assert '+                                "turtle_input_file_cache": turtle_input_file_cache,' in overlay
     assert "+                        self.turtle_input_file_caches.pop(resource_id, None)" in overlay
+    assert "TURTLE_MEDIA_UPLOAD_CONCURRENCY" in LAUNCHER_MODULE.ALLOWED_ENV_NAMES
 
 
 def test_gpt4free_overlay_captures_login_without_sending_a_chat() -> None:
