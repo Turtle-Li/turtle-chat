@@ -13,7 +13,9 @@ import os
 import time
 from urllib.parse import quote, urlencode, urlsplit
 
-import httpx
+import aiohttp
+
+from open_webui.utils.session_pool import get_session
 
 
 class AccountPoolCapacityUnavailable(RuntimeError):
@@ -27,7 +29,11 @@ def _boolean(name: str, default: bool = False) -> bool:
 
 class AccountPoolAdmission:
     def __init__(self) -> None:
-        self.cache_seconds = 0.75
+        # Capacity is a healthy-slot ceiling, not a snapshot of currently
+        # available slots; Redis admission accounts for active leases. A short
+        # cache therefore avoids a control-plane HTTP round trip on every
+        # human turn while health/cooldown changes still converge promptly.
+        self.cache_seconds = 5.0
         self._cache: dict[str, tuple[float, dict[str, int]]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
@@ -87,22 +93,24 @@ class AccountPoolAdmission:
                 raise AccountPoolCapacityUnavailable("Gateway 账号组容量连接未配置")
             url, key = target
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(1.2, connect=0.5),
-                    trust_env=False,
-                ) as client:
-                    response = await client.get(
-                        url,
-                        headers={"Authorization": f"Bearer {key}"},
-                    )
-            except (httpx.TimeoutException, httpx.HTTPError) as exc:
+                session = await get_session()
+                async with session.get(
+                    url,
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=aiohttp.ClientTimeout(total=1.2, connect=0.5),
+                ) as response:
+                    if not 200 <= response.status < 300:
+                        raise AccountPoolCapacityUnavailable(
+                            "Provider 账号池不存在或不可用"
+                        )
+                    payload = await response.json()
+            except AccountPoolCapacityUnavailable:
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 raise AccountPoolCapacityUnavailable(
                     "Gateway 账号组容量暂时不可读取"
                 ) from exc
-            if not response.is_success:
-                raise AccountPoolCapacityUnavailable("Provider 账号池不存在或不可用")
             try:
-                payload = response.json()
                 limits = {
                     "account_pool": max(
                         0, int(payload.get("admission_capacity") or 0)
