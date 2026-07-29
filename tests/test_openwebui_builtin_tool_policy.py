@@ -23,7 +23,8 @@ def test_plain_conversation_uses_fast_path() -> None:
             "web_search": False,
             "image_generation": False,
             "code_interpreter": False,
-            "memory": False,
+            "memory": True,
+            "voice": False,
         },
         files=[],
         skill_ids=[],
@@ -64,6 +65,21 @@ def test_workspace_intent_without_toggle_keeps_builtin_tools() -> None:
         assert should_enable_builtin_tools(prompt=prompt)
 
 
+def test_memory_tools_require_explicit_memory_intent() -> None:
+    assert not should_enable_builtin_tools(
+        prompt="你好",
+        features={"memory": True},
+    )
+    assert should_enable_builtin_tools(
+        prompt="请记住我喜欢喝黑咖啡",
+        features={"memory": True},
+    )
+    assert not should_enable_builtin_tools(
+        prompt="请记住我喜欢喝黑咖啡",
+        features={"memory": False},
+    )
+
+
 def test_patcher_wires_policy_before_builtin_resolution() -> None:
     patcher = (OPEN_WEBUI_BRANDING / "patch_open_webui.py").read_text(encoding="utf-8")
     assert "from open_webui.turtle_chat.tool_policy import builtin_tool_reasons" in patcher
@@ -78,4 +94,4 @@ def test_reason_labels_do_not_include_user_values() -> None:
         features={"web_search": True},
         files=[{"name": "private-name.txt"}],
         tool_ids=["private-tool-id"],
-    ) == ("features", "files", "selected_tools", "workspace_intent")
+    ) == ("feature:web_search", "files", "selected_tools", "workspace_intent")

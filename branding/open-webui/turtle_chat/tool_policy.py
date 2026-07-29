@@ -30,6 +30,23 @@ _WORKSPACE_TOOL_INTENT = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+_MEMORY_TOOL_INTENT = re.compile(
+    r"""
+    (?:
+        (?:请|帮我)?(?:记住|记一下|保存到记忆|写入记忆|更新记忆|删除记忆|忘记)
+        |\b(?:remember|memorize|save\s+(?:this\s+)?to\s+memory|update\s+(?:my\s+)?memory|
+            forget|delete\s+from\s+memory)\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_EXPLICIT_TOOL_FEATURES = (
+    "web_search",
+    "image_generation",
+    "code_interpreter",
+)
+
 
 def _has_items(value: Any) -> bool:
     if value is None:
@@ -62,8 +79,17 @@ def builtin_tool_reasons(
     if note_chat:
         reasons.append("note_chat")
 
-    if features and any(bool(value) for value in features.values()):
-        reasons.append("features")
+    features = features or {}
+    for feature in _EXPLICIT_TOOL_FEATURES:
+        if bool(features.get(feature)):
+            reasons.append(f"feature:{feature}")
+
+    # Open WebUI enables memory context by default for ordinary UI requests.
+    # Reading that context happens earlier in the middleware and does not need
+    # the full CRUD tool bundle. Load those tools only for an explicit memory
+    # action, keeping the default greeting path tool-free.
+    if bool(features.get("memory")) and prompt and _MEMORY_TOOL_INTENT.search(prompt):
+        reasons.append("feature:memory")
 
     for reason, value in (
         ("files", files),
