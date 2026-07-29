@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly DEPLOY_ROOT=/opt/turtle-gpt/deploy
+readonly APP_DIR=/opt/turtle-gpt/app
+readonly STATE_DIR="$DEPLOY_ROOT/state"
+readonly COMPOSE_FILE="$DEPLOY_ROOT/compose.blue-green.yml"
+readonly PROJECT_NAME=turtle-gpt-deploy
+readonly LOCK_FILE=/run/lock/turtle-gpt-production-deploy.lock
+
+slot=${1:-}
+expected_release=${2:-}
+if [[ $slot != blue && $slot != green ]]; then
+  echo "invalid slot" >&2
+  exit 64
+fi
+if [[ -z $expected_release ]]; then
+  # Timers created before release guards were introduced must never stop a
+  # slot that may since have been reused by a newer deployment.
+  exit 0
+fi
+if [[ ! $expected_release =~ ^[0-9a-f]{40}$ ]]; then
+  echo "invalid expected release" >&2
+  exit 64
+fi
+
+exec 9>"$LOCK_FILE"
+flock -w 1800 9 || exit 0
+
+if [[ ! -f "$STATE_DIR/active-slot" ]] || [[ $(<"$STATE_DIR/active-slot") == "$slot" ]]; then
+  exit 0
+fi
+
+compose() {
+  docker compose \
+    --project-name "$PROJECT_NAME" \
+    --env-file "$APP_DIR/.env" \
+    --env-file "$STATE_DIR/slots.env" \
+    --file "$COMPOSE_FILE" "$@"
+}
+
+for service in "gateway-$slot" "open-webui-$slot"; do
+  container_id=$(compose ps --quiet "$service")
+  if [[ -z $container_id ]]; then
+    exit 0
+  fi
+  revision=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$container_id")
+  if [[ $revision != "$expected_release" ]]; then
+    exit 0
+  fi
+done
+
+compose \
+  stop --timeout 60 "open-webui-$slot" "gateway-$slot"

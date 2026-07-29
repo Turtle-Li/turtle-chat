@@ -1,0 +1,233 @@
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:1b1689b20d16a014a3d195653381cf2caa75a41a92d93b255a9d6ea29fd353aa
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: turtle
+      POSTGRES_USER: turtle
+      POSTGRES_PASSWORD_FILE: /run/secrets/turtle_postgres_password
+    command:
+      - postgres
+      - -c
+      - max_connections=50
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_completion_target=0.9
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turtle -d turtle"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    secrets:
+      - turtle_postgres_password
+    volumes:
+      - turtle-postgres-data:/var/lib/postgresql
+    networks:
+      - turtle-data
+    shm_size: 256mb
+    stop_grace_period: 1m
+
+  redis:
+    image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+    restart: unless-stopped
+    command:
+      - sh
+      - -ec
+      - >-
+        exec redis-server --save '' --appendonly no --maxmemory 128mb
+        --maxmemory-policy allkeys-lru
+        --requirepass "$$(cat /run/secrets/turtle_redis_password)"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/turtle_redis_password) redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    secrets:
+      - turtle_redis_password
+    networks:
+      - turtle-data
+
+  gateway:
+    build: .
+    image: ${GATEWAY_IMAGE:-turtle-gpt-gateway:0.1.0}
+    user: ${GATEWAY_RUNTIME_USER:-65532:65532}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:?set GATEWAY_API_KEY in .env}
+      GATEWAY_BACKEND: upstream
+      PUBLIC_MODEL_NAME: gpt-5-web
+      UPSTREAM_MODEL: auto
+      UPSTREAM_BASE_URL: ${COMPOSE_GPT_UPSTREAM_BASE_URL:-http://host.docker.internal:8320/v1}
+      UPSTREAM_HEALTH_PATH: /api/OpenaiAccount/quota
+      CLAUDE_PUBLIC_MODEL_NAME: claude-web
+      CLAUDE_UPSTREAM_BASE_URL: ${COMPOSE_CLAUDE_UPSTREAM_BASE_URL:-http://host.docker.internal:8330/v1}
+      CLAUDE_UPSTREAM_HEALTH_PATH: /healthz
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:?set UPSTREAM_API_KEY in .env}
+      UPSTREAM_TIMEOUT_SECONDS: 900
+      GATEWAY_BIND_HOST: 0.0.0.0
+      GATEWAY_PORT: 8000
+      GATEWAY_STREAM_CHUNK_CHARS: 8
+      GATEWAY_STREAM_CHUNK_DELAY_MS: 18
+      GATEWAY_ACCOUNT_POOL_ENABLED: "true"
+      GATEWAY_CLAUDE_POOL_ENABLED: "true"
+      GATEWAY_DEFAULT_ACCOUNT_POOL_ID: gpt-default
+      GATEWAY_DEFAULT_CLAUDE_ACCOUNT_POOL_ID: claude-default
+      GATEWAY_ACCOUNT_LEASE_SECONDS: ${GATEWAY_ACCOUNT_LEASE_SECONDS:-1200}
+      GATEWAY_ACCOUNT_COOLDOWN_SECONDS: ${GATEWAY_ACCOUNT_COOLDOWN_SECONDS:-300}
+      GATEWAY_ACCOUNT_FAILOVER_MAX_ATTEMPTS: ${GATEWAY_ACCOUNT_FAILOVER_MAX_ATTEMPTS:-3}
+      GATEWAY_UPSTREAM_CLEANUP_ENABLED: ${GATEWAY_UPSTREAM_CLEANUP_ENABLED:-true}
+      GATEWAY_UPSTREAM_CLEANUP_EXECUTE: ${GATEWAY_UPSTREAM_CLEANUP_EXECUTE:-false}
+      GATEWAY_UPSTREAM_CLEANUP_TTL_SECONDS: ${GATEWAY_UPSTREAM_CLEANUP_TTL_SECONDS:-2592000}
+      GATEWAY_UPSTREAM_CLEANUP_CONVERSATION_ACTION: ${GATEWAY_UPSTREAM_CLEANUP_CONVERSATION_ACTION:-delete}
+      GATEWAY_UPSTREAM_CLEANUP_INTERVAL_SECONDS: ${GATEWAY_UPSTREAM_CLEANUP_INTERVAL_SECONDS:-300}
+      GATEWAY_UPSTREAM_CLEANUP_BATCH_SIZE: ${GATEWAY_UPSTREAM_CLEANUP_BATCH_SIZE:-20}
+      GATEWAY_ACCOUNT_ALLOWED_HOSTS: host.docker.internal,127.0.0.1,localhost
+      GATEWAY_LOGIN_CONTROL_URL: ${COMPOSE_LOGIN_CONTROL_URL:-http://host.docker.internal:8340}
+      GATEWAY_LOGIN_CONTROL_SECRET_FILE: /run/secrets/turtle_login_control_secret
+      DATABASE_USER: turtle
+      DATABASE_PASSWORD_FILE: /run/secrets/turtle_postgres_password
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: turtle
+      TURTLE_MEDIA_STRICT: "true"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - ${GATEWAY_PUBLISH_IP:-127.0.0.1}:${GATEWAY_PUBLISH_PORT:-8000}:8000
+    secrets:
+      - turtle_postgres_password
+      - turtle_login_control_secret
+    networks:
+      - default
+      - turtle-data
+
+  open-webui:
+    build:
+      context: ./branding/open-webui
+      args:
+        OPEN_WEBUI_BASE_IMAGE: ${OPEN_WEBUI_BASE_IMAGE:-ghcr.io/open-webui/open-webui@sha256:72c0ba641ba75e7aa52655cb242570906ececd09b1140fb736483038a22b3228}
+    image: ${OPEN_WEBUI_IMAGE:-turtle-gpt-open-webui:0.5.0}
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      OPENAI_API_BASE_URLS: ${COMPOSE_OPENAI_API_BASE_URLS:-http://gateway:8000/v1}
+      OPENAI_API_KEYS: ${GATEWAY_API_KEY:?set GATEWAY_API_KEY in .env}
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+      ENABLE_COMPRESSION_MIDDLEWARE: "true"
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: "true"
+      ENABLE_SIGNUP_PASSWORD_CONFIRMATION: "true"
+      DEFAULT_USER_ROLE: "pending"
+      DEFAULT_LOCALE: zh-CN
+      WEBUI_NAME: "Turtle’s Chat"
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:?set WEBUI_SECRET_KEY in .env}
+      DATABASE_TYPE: postgresql+psycopg
+      DATABASE_USER: turtle
+      DATABASE_PASSWORD_FILE: /run/secrets/turtle_postgres_password
+      DATABASE_HOST: postgres
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: turtle
+      DATABASE_POOL_SIZE: "10"
+      DATABASE_POOL_MAX_OVERFLOW: "10"
+      DATABASE_POOL_TIMEOUT: "30"
+      DATABASE_POOL_RECYCLE: "1800"
+      TURTLE_DATABASE_POOL_SIZE: "5"
+      TURTLE_DATABASE_POOL_MAX_OVERFLOW: "5"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DATABASE: "0"
+      REDIS_PASSWORD_FILE: /run/secrets/turtle_redis_password
+      REDIS_KEY_PREFIX: turtle-gpt
+      TURTLE_CONCURRENCY_BACKEND: redis
+      # These are safety ceilings. Effective capacity is resolved live from
+      # healthy account slots and can be lower without a rebuild.
+      TURTLE_CHAT_MAX_CONCURRENCY: ${TURTLE_CHAT_MAX_CONCURRENCY:-32}
+      TURTLE_GPT_MAX_CONCURRENCY: ${TURTLE_GPT_MAX_CONCURRENCY:-24}
+      TURTLE_CLAUDE_MAX_CONCURRENCY: ${TURTLE_CLAUDE_MAX_CONCURRENCY:-4}
+      TURTLE_ACCOUNT_POOL_ADMISSION_ENABLED: "true"
+      TURTLE_CHAT_QUEUE_TIMEOUT_SECONDS: ${TURTLE_CHAT_QUEUE_TIMEOUT_SECONDS:-120}
+      TURTLE_CHAT_LEASE_SECONDS: ${TURTLE_CHAT_LEASE_SECONDS:-1200}
+      TURTLE_REDIS_MAX_CONNECTIONS: ${TURTLE_REDIS_MAX_CONNECTIONS:-100}
+      TURTLE_REDIS_COMMAND_CONCURRENCY: ${TURTLE_REDIS_COMMAND_CONCURRENCY:-64}
+      TURTLE_REDIS_MAINTENANCE_CONCURRENCY: ${TURTLE_REDIS_MAINTENANCE_CONCURRENCY:-16}
+      TURTLE_REDIS_WAKE_HEADS_PER_POOL: ${TURTLE_REDIS_WAKE_HEADS_PER_POOL:-32}
+      TURTLE_SUBSCRIPTION_CACHE_TTL_SECONDS: ${TURTLE_SUBSCRIPTION_CACHE_TTL_SECONDS:-120}
+      TURTLE_SUBSCRIPTION_NEGATIVE_TTL_SECONDS: ${TURTLE_SUBSCRIPTION_NEGATIVE_TTL_SECONDS:-15}
+      TURTLE_SUBSCRIPTION_LOCK_TTL_MS: ${TURTLE_SUBSCRIPTION_LOCK_TTL_MS:-5000}
+      TURTLE_SUBSCRIPTION_LOCK_WAIT_MS: ${TURTLE_SUBSCRIPTION_LOCK_WAIT_MS:-1500}
+      TURTLE_SUBSCRIPTION_REDIS_TIMEOUT_MS: ${TURTLE_SUBSCRIPTION_REDIS_TIMEOUT_MS:-350}
+      TURTLE_SUBSCRIPTION_DB_FALLBACK_CONCURRENCY: ${TURTLE_SUBSCRIPTION_DB_FALLBACK_CONCURRENCY:-8}
+      TURTLE_MONITOR_SCOPE: container
+      TURTLE_MONITOR_INTERVAL_SECONDS: "5"
+      WEBSOCKET_MANAGER: redis
+      WEBSOCKET_REDIS_LOCK_TIMEOUT: "300"
+      STORAGE_PROVIDER: "turtle"
+      TURTLE_STORAGE_MASTER_KEY: ${TURTLE_STORAGE_MASTER_KEY:-}
+      TURTLE_MEDIA_STRICT: "true"
+      TURTLE_MEDIA_PUMP_URL: ${TURTLE_MEDIA_PUMP_URL:-}
+      TURTLE_MEDIA_PUMP_SECRET: ${TURTLE_MEDIA_PUMP_SECRET:-}
+      TURTLE_MEDIA_PUMP_TIMEOUT_SECONDS: ${TURTLE_MEDIA_PUMP_TIMEOUT_SECONDS:-1800}
+      ENABLE_CHAT_RESPONSE_BASE64_IMAGE_URL_CONVERSION: "false"
+      ENABLE_IMAGE_GENERATION: "true"
+      ENABLE_IMAGE_PROMPT_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+      IMAGE_GENERATION_ENGINE: openai
+      IMAGE_GENERATION_MODEL: gpt-image
+      IMAGE_SIZE: 1024x1024
+      IMAGES_OPENAI_API_BASE_URL: ${COMPOSE_GPT_IMAGES_BASE_URL:-http://host.docker.internal:8320/v1}
+      IMAGES_OPENAI_API_KEY: ${UPSTREAM_API_KEY:?set UPSTREAM_API_KEY in .env}
+      IMAGES_OPENAI_PARAMS: '{"response_format":"url"}'
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      FORWARD_USER_INFO_HEADER_JWT_SECRET: ${FORWARD_USER_INFO_HEADER_JWT_SECRET:?set FORWARD_USER_INFO_HEADER_JWT_SECRET in .env}
+      ENABLE_EASTER_EGGS: "false"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    secrets:
+      - turtle_postgres_password
+      - turtle_redis_password
+    ports:
+      - ${WEBUI_PUBLISH_IP:-127.0.0.1}:${WEBUI_PUBLISH_PORT:-3000}:8080
+    volumes:
+      - open-webui-data:/app/backend/data
+    networks:
+      - default
+      - turtle-data
+
+volumes:
+  open-webui-data:
+  turtle-postgres-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${TURTLE_DOCKER_SUBNET:-172.30.23.0/24}
+  turtle-data:
+    internal: true
+
+secrets:
+  turtle_postgres_password:
+    file: ./.runtime/secrets/turtle_postgres_password
+  turtle_redis_password:
+    file: ./.runtime/secrets/turtle_redis_password
+  turtle_login_control_secret:
+    file: ./.runtime/secrets/turtle_login_control_secret

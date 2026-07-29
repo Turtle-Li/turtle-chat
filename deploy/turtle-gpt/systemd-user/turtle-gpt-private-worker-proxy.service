@@ -1,0 +1,24 @@
+[Unit]
+Description=Turtle Chat private Docker bridge proxy for loopback workers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/turtle-gpt/app
+EnvironmentFile=/opt/turtle-gpt/app/.env
+Environment=TURTLE_WORKER_PROXY_BIND_HOST=172.17.0.1
+Environment=TURTLE_WORKER_PROXY_ALLOWED_CIDRS=172.30.23.0/24
+Environment=TURTLE_WORKER_PROXY_FIXED_PORTS=38330,38340
+Environment=TURTLE_WORKER_PROXY_PRIMARY_PORT=38320
+Environment=TURTLE_WORKER_PROXY_DYNAMIC_PORT_START=38360
+Environment=TURTLE_WORKER_PROXY_DYNAMIC_PORT_END=40359
+ExecStart=/opt/turtle-gpt/app/.venv/bin/python -m chatgpt_web_gateway.private_worker_proxy
+Restart=always
+RestartSec=3
+UMask=0077
+StandardOutput=append:/opt/turtle-gpt/app/.runtime/logs/private-worker-proxy.stdout.log
+StandardError=append:/opt/turtle-gpt/app/.runtime/logs/private-worker-proxy.stderr.log
+
+[Install]
+WantedBy=default.target

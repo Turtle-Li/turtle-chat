@@ -1,0 +1,64 @@
+map $http_upgrade $turtle_connection_upgrade {
+    default upgrade;
+    '' close;
+}
+
+upstream turtle_webui {
+    server open-webui-__TURTLE_SLOT__:8080;
+    keepalive 32;
+}
+
+upstream turtle_gateway {
+    server gateway-__TURTLE_SLOT__:8000;
+    keepalive 16;
+}
+
+server {
+    listen 8080;
+    server_name _;
+    client_max_body_size 250m;
+
+    location = /__turtle_router_health {
+        default_type text/plain;
+        return 200 "slot=__TURTLE_SLOT__\n";
+    }
+
+    location / {
+        proxy_pass http://turtle_webui;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $turtle_connection_upgrade;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 1900s;
+        proxy_send_timeout 1900s;
+    }
+}
+
+server {
+    listen 8000;
+    server_name _;
+    client_max_body_size 2m;
+
+    location = /__turtle_router_health {
+        default_type text/plain;
+        return 200 "slot=__TURTLE_SLOT__\n";
+    }
+
+    location / {
+        proxy_pass http://turtle_gateway;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_read_timeout 920s;
+        proxy_send_timeout 920s;
+    }
+}

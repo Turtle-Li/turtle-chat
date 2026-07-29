@@ -1,0 +1,25 @@
+services:
+  media-pump:
+    build:
+      context: ../..
+    image: turtle-media-pump:0.1.0
+    command: ["turtle-media-pump"]
+    restart: unless-stopped
+    environment:
+      MEDIA_PUMP_SHARED_SECRET: ${MEDIA_PUMP_SHARED_SECRET:?set a distinct random pump secret}
+      MEDIA_PUMP_SOURCE_HOSTS: ${MEDIA_PUMP_SOURCE_HOSTS:?set trusted source host suffixes}
+      MEDIA_PUMP_DESTINATION_HOSTS: ${MEDIA_PUMP_DESTINATION_HOSTS:?set trusted destination host suffixes}
+      MEDIA_PUMP_MAX_BYTES: ${MEDIA_PUMP_MAX_BYTES:-5368709120}
+      MEDIA_PUMP_TIMEOUT_SECONDS: ${MEDIA_PUMP_TIMEOUT_SECONDS:-1800}
+      MEDIA_PUMP_TIMESTAMP_SKEW_SECONDS: ${MEDIA_PUMP_TIMESTAMP_SKEW_SECONDS:-90}
+      MEDIA_PUMP_BIND_HOST: 0.0.0.0
+      MEDIA_PUMP_PORT: 8090
+    ports:
+      - 127.0.0.1:8090:8090
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

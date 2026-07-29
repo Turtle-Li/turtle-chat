@@ -1,0 +1,14 @@
+# BEGIN TURTLE-GPT MANAGED SITE
+chat.turtleligpt.com {
+	encode zstd gzip
+
+	@remote_login path /__turtle_login/*
+	handle @remote_login {
+		reverse_proxy 172.18.0.1:36080
+	}
+
+	handle {
+		reverse_proxy 172.18.0.1:33010
+	}
+}
+# END TURTLE-GPT MANAGED SITE

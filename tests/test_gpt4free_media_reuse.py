@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import importlib.util
+import json
+import os
+import sys
+import time
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / ".runtime" / "gpt4free-src"))
+if importlib.util.find_spec("aiohttp") is None:
+    raise unittest.SkipTest("gpt4free runtime dependencies are not installed")
+
+from g4f.Provider.needs_auth.OpenaiChat import (  # noqa: E402
+    OpenaiChat,
+    Conversation,
+    PRIVATE_INPUT_FILE_CACHE_ATTR,
+    _merge_model_media,
+    _new_media_metrics,
+    _private_input_file_cache_key,
+)
+from g4f.Provider.openai.media_pump import (  # noqa: E402
+    MODEL_SOURCE_CONTEXT,
+    MODEL_INPUT_MAX_BYTES,
+    MediaPumpError,
+    ModelMediaSource,
+    open_model_source,
+    probe_media,
+)
+
+
+PUMP_SECRET = "unit-test-pump-secret-that-is-at-least-thirty-two-characters"
+
+
+def _b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def sealed_image_url(*, expires_at: int | None = None) -> dict:
+    primary = (
+        "https://files.chat.totools.cn/"
+        "turtle-gpt/files/users/user-a/image.png?sign=test"
+    )
+    payload = {
+        "v": 1,
+        "exp": expires_at or int(time.time()) + 600,
+        "id": "a" * 64,
+        "primary_url": primary,
+        "fallback_url": (
+            "https://bucket.cos.ap-shanghai.myqcloud.com/"
+            "turtle-gpt/files/users/user-a/image.png?q-signature"
+        ),
+    }
+    encoded = _b64url(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
+    signature = hmac.new(
+        PUMP_SECRET.encode("utf-8"),
+        MODEL_SOURCE_CONTEXT + encoded.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return {
+        "url": primary,
+        "turtle_source": f"{encoded}.{_b64url(signature)}",
+    }
+
+
+class FakeResponse:
+    def __init__(self, payload: dict, status: int = 200):
+        self.payload = payload
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def json(self):
+        return self.payload
+
+
+class FakeSession:
+    def __init__(self, *, post_payloads: list[dict] | None = None):
+        self.cookie_jar = []
+        self.post_payloads = list(post_payloads or [])
+        self.get_count = 0
+        self.post_count = 0
+
+    def get(self, _url, **_kwargs):
+        self.get_count += 1
+        return FakeResponse({"download_url": "https://oaiusercontent.example/reused"})
+
+    def post(self, _url, **_kwargs):
+        self.post_count += 1
+        return FakeResponse(self.post_payloads.pop(0))
+
+
+class ModelSourceEnvelopeTests(unittest.TestCase):
+    def setUp(self):
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "TURTLE_MEDIA_PUMP_URL": "https://pump.example",
+                "TURTLE_MEDIA_PUMP_SECRET": PUMP_SECRET,
+            },
+            clear=False,
+        )
+        self.environment.start()
+
+    def tearDown(self):
+        self.environment.stop()
+
+    def test_signed_source_round_trips_and_tampering_fails_closed(self):
+        image_url = sealed_image_url()
+        source = open_model_source(image_url)
+
+        self.assertEqual(source.media_id, "a" * 64)
+        self.assertEqual(source.primary_url, image_url["url"])
+        self.assertIn(".cos.ap-shanghai.myqcloud.com/", source.fallback_url)
+
+        tampered = dict(image_url)
+        tampered["url"] = tampered["url"].replace("image.png", "other.png")
+        with self.assertRaises(MediaPumpError):
+            open_model_source(tampered)
+
+        expired = sealed_image_url(expires_at=int(time.time()) - 1)
+        with self.assertRaises(MediaPumpError):
+            open_model_source(expired)
+
+    def test_merge_preserves_verified_source_metadata_for_last_user_branch(self):
+        image_url = sealed_image_url()
+        messages = [
+            {"role": "assistant", "content": "prior"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect"},
+                    {"type": "image_url", "image_url": image_url},
+                ],
+            },
+        ]
+
+        merged = list(_merge_model_media(None, messages))
+
+        self.assertEqual(len(merged), 1)
+        self.assertIsInstance(merged[0][0], ModelMediaSource)
+        self.assertEqual(merged[0][0].media_id, "a" * 64)
+
+    def test_merge_deduplicates_message_and_compatibility_media_source(self):
+        image_url = sealed_image_url()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect"},
+                    {"type": "image_url", "image_url": image_url},
+                ],
+            },
+        ]
+
+        merged = list(
+            _merge_model_media([(image_url["url"], "image.png")], messages)
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertIsInstance(merged[0][0], ModelMediaSource)
+        self.assertEqual(merged[0][0].media_id, "a" * 64)
+
+
+class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "TURTLE_MEDIA_PUMP_URL": "https://pump.example",
+                "TURTLE_MEDIA_PUMP_SECRET": PUMP_SECRET,
+            },
+            clear=False,
+        )
+        self.environment.start()
+        OpenaiChat._headers = {}
+        self.auth = SimpleNamespace(cookies={}, headers={})
+
+    async def asyncTearDown(self):
+        self.environment.stop()
+
+    async def test_valid_cached_file_id_skips_probe_and_transfer(self):
+        source = open_model_source(sealed_image_url())
+        source_cache_key = _private_input_file_cache_key(source)
+        conversation = Conversation(user_id=None)
+        conversation.turtle_media_metrics = _new_media_metrics()
+        setattr(
+            conversation,
+            PRIVATE_INPUT_FILE_CACHE_ATTR,
+            {
+                source_cache_key: {
+                    "file_id": "file_12345678",
+                    "file_name": "image.png",
+                    "file_size": 4,
+                    "use_case": "multimodal",
+                    "mime_type": "image/png",
+                    "extension": ".png",
+                    "width": 1,
+                    "height": 1,
+                }
+            },
+        )
+        session = FakeSession()
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.probe_media",
+                new=AsyncMock(side_effect=AssertionError("probe must not run")),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=AsyncMock(side_effect=AssertionError("transfer must not run")),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+        ):
+            uploaded = await OpenaiChat.upload_files(
+                session,
+                self.auth,
+                [source],
+                conversation,
+            )
+
+        self.assertEqual(uploaded[0].get("file_id"), "file_12345678")
+        self.assertEqual(session.get_count, 1)
+        self.assertEqual(session.post_count, 0)
+        self.assertEqual(conversation.turtle_media_metrics["file_cache_hit"], 1)
+        self.assertEqual(conversation.turtle_media_metrics["transfer_count"], 0)
+
+    async def test_cache_miss_uploads_once_and_stores_only_minimal_metadata(self):
+        source = open_model_source(sealed_image_url())
+        conversation = Conversation(user_id=None)
+        conversation.turtle_media_metrics = _new_media_metrics()
+        shared_cache = {}
+        setattr(conversation, PRIVATE_INPUT_FILE_CACHE_ATTR, shared_cache)
+        session = FakeSession(
+            post_payloads=[
+                {
+                    "file_id": "file_abcdefgh",
+                    "upload_url": "https://oaiusercontent.example/upload-target",
+                },
+                {"download_url": "https://oaiusercontent.example/download"},
+            ]
+        )
+        probe = {
+            "size": 4,
+            "content_type": "image/png",
+            "max_bytes": 1024,
+            "width": 1,
+            "height": 1,
+            "source": "primary",
+            "cdn_cache": "miss",
+        }
+        transfer = {
+            "size": 4,
+            "source": "primary",
+            "cdn_cache": "hit",
+        }
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.probe_media",
+                new=AsyncMock(return_value=probe),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=AsyncMock(return_value=transfer),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            uploaded = await OpenaiChat.upload_files(
+                session,
+                self.auth,
+                [source],
+                conversation,
+            )
+
+        cache = getattr(conversation, PRIVATE_INPUT_FILE_CACHE_ATTR)
+        self.assertIs(cache, shared_cache)
+        cached = cache[_private_input_file_cache_key(source)]
+        self.assertEqual(uploaded[0].get("file_id"), "file_abcdefgh")
+        self.assertNotIn("upload_url", cached)
+        self.assertNotIn("download_url", cached)
+        self.assertEqual(conversation.turtle_media_metrics["file_cache_miss"], 1)
+        self.assertEqual(conversation.turtle_media_metrics["cdn_miss"], 1)
+        self.assertEqual(conversation.turtle_media_metrics["cdn_hit"], 1)
+        self.assertEqual(conversation.turtle_media_metrics["transfer_bytes"], 4)
+        self.assertNotIn(PRIVATE_INPUT_FILE_CACHE_ATTR, conversation.get_dict())
+
+    def test_private_cache_key_ignores_signed_query_and_envelope_identity(self):
+        first = ModelMediaSource(
+            "https://files.chat.totools.cn/"
+            "turtle-gpt/files/users/user-a/image.png?sign=first",
+            media_id="a" * 64,
+        )
+        second = ModelMediaSource(
+            "https://files.chat.totools.cn/"
+            "turtle-gpt/files/users/user-a/image.png?sign=second",
+            media_id="b" * 64,
+        )
+        different = ModelMediaSource(
+            "https://files.chat.totools.cn/"
+            "turtle-gpt/files/users/user-a/other.png?sign=second",
+            media_id="a" * 64,
+        )
+
+        self.assertEqual(
+            _private_input_file_cache_key(first),
+            _private_input_file_cache_key(second),
+        )
+        self.assertNotEqual(
+            _private_input_file_cache_key(first),
+            _private_input_file_cache_key(different),
+        )
+
+    async def test_model_probe_limit_is_clamped_below_worker_buffer_boundary(self):
+        source = open_model_source(sealed_image_url())
+        pump_result = {
+            "size": 4,
+            "content_type": "image/png",
+            "source": "primary",
+            "cdn_cache": "hit",
+        }
+        with (
+            patch.dict(
+                os.environ,
+                {"TURTLE_MEDIA_PUMP_MAX_INPUT_BYTES": str(200 * 1024**2)},
+                clear=False,
+            ),
+            patch(
+                "g4f.Provider.openai.media_pump._post_sync",
+                return_value=pump_result,
+            ) as post,
+        ):
+            result = await probe_media(source)
+
+        self.assertEqual(result["size"], 4)
+        self.assertEqual(
+            post.call_args.args[1]["max_bytes"],
+            MODEL_INPUT_MAX_BYTES,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

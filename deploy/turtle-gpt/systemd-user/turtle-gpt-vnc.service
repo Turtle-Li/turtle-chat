@@ -1,0 +1,15 @@
+[Unit]
+Description=Turtle Chat loopback-only login display bridge
+Requires=turtle-gpt-xvfb.service
+After=turtle-gpt-xvfb.service
+
+[Service]
+Type=simple
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/x11vnc -display :99 -rfbport 35900 -localhost -forever -shared -nopw -noclipboard -nosel -noprimary -noxdamage
+Restart=always
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=default.target

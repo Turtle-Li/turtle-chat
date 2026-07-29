@@ -1,0 +1,18 @@
+[Unit]
+Description=Turtle Chat isolated Claude Web worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/turtle-gpt/app
+EnvironmentFile=/opt/turtle-gpt/app/.env
+ExecStart=/opt/turtle-gpt/app/.venv/bin/python /opt/turtle-gpt/app/scripts/run_claude_worker.py
+Restart=always
+RestartSec=5
+UMask=0077
+StandardOutput=append:/opt/turtle-gpt/app/.runtime/logs/claude.stdout.log
+StandardError=append:/opt/turtle-gpt/app/.runtime/logs/claude.stderr.log
+
+[Install]
+WantedBy=default.target

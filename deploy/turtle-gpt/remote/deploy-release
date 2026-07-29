@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly DEPLOY_ROOT=/opt/turtle-gpt/deploy
+readonly APP_DIR=/opt/turtle-gpt/app
+readonly STATE_DIR="$DEPLOY_ROOT/state"
+readonly RELEASES_DIR=/opt/turtle-gpt/releases
+readonly BACKUPS_DIR=/opt/turtle-gpt/backups
+readonly COMPOSE_FILE="$DEPLOY_ROOT/compose.blue-green.yml"
+readonly ROUTER_TEMPLATE="$DEPLOY_ROOT/router.conf.template"
+readonly PROJECT_NAME=turtle-gpt-deploy
+readonly LOCK_FILE=/run/lock/turtle-gpt-production-deploy.lock
+readonly DRAIN_SECONDS=1200
+readonly SHA=${1:-}
+readonly SHORT_SHA=${SHA:0:12}
+
+log() {
+  printf '[turtle-deploy] %s\n' "$*"
+}
+
+fail() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+[[ $SHA =~ ^[0-9a-f]{40}$ ]] || fail "invalid commit"
+[[ $EUID -eq 0 ]] || fail "deployment must run as root"
+[[ -f "$APP_DIR/.env" ]] || fail "production .env is missing"
+[[ -f "$COMPOSE_FILE" && -f "$ROUTER_TEMPLATE" ]] || fail "deployment control files are missing"
+
+mkdir -p "$STATE_DIR/router" "$RELEASES_DIR"
+exec 9>"$LOCK_FILE"
+flock -w 1800 9 || fail "another deployment still holds the production lock"
+
+bundle_dir=$(mktemp -d "$DEPLOY_ROOT/incoming.XXXXXX")
+cleanup() {
+  rm -rf -- "$bundle_dir"
+}
+trap cleanup EXIT
+
+log "receiving release $SHORT_SHA"
+tar --extract --file - --directory "$bundle_dir" --no-same-owner --no-same-permissions
+
+actual_files=$(find "$bundle_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
+source_files=$'commit\nmanifest.sha256\nsource.tar.gz'
+legacy_files=$'commit\nimages.tar.zst\nmanifest.sha256\nsource.tar.gz'
+if [[ $actual_files == "$source_files" ]]; then
+  bundle_mode=source
+elif [[ $actual_files == "$legacy_files" ]]; then
+  bundle_mode=prebuilt
+else
+  fail "release bundle contains unexpected files"
+fi
+[[ $(<"$bundle_dir/commit") == "$SHA" ]] || fail "release commit does not match requested commit"
+
+if [[ $bundle_mode == source ]]; then
+  if [[ $(wc -l <"$bundle_dir/manifest.sha256") -ne 1 ]] ||
+     grep -Evq '^[0-9a-f]{64}  source\.tar\.gz$' "$bundle_dir/manifest.sha256"; then
+    fail "source release manifest is invalid"
+  fi
+else
+  if [[ $(wc -l <"$bundle_dir/manifest.sha256") -ne 2 ]] ||
+     grep -Evq '^[0-9a-f]{64}  (images\.tar\.zst|source\.tar\.gz)$' "$bundle_dir/manifest.sha256"; then
+    fail "prebuilt release manifest is invalid"
+  fi
+fi
+(
+  cd "$bundle_dir"
+  sha256sum --check --status manifest.sha256
+) || fail "release bundle checksum mismatch"
+
+if tar -tzf "$bundle_dir/source.tar.gz" |
+  grep -Eq '(^/|(^|/)\.\.(/|$)|(^|/)\.env$|(^|/)\.runtime(/|$))'; then
+  fail "source archive contains a forbidden path"
+fi
+
+if [[ -f "$STATE_DIR/active-release" ]] && [[ $(<"$STATE_DIR/active-release") == "$SHA" ]]; then
+  log "release $SHORT_SHA is already active"
+  exit 0
+fi
+
+release_tmp="$RELEASES_DIR/.${SHA}.tmp"
+release_dir="$RELEASES_DIR/$SHA"
+rm -rf -- "$release_tmp"
+mkdir -p "$release_tmp"
+# This script intentionally runs with umask 077, but the reviewed source tree
+# must keep Git's 0644/0755 modes so the unprivileged Turtle worker can read
+# its launcher and overlay after a controlled restart.
+tar -xzf "$bundle_dir/source.tar.gz" -C "$release_tmp" --no-same-owner --same-permissions
+if [[ -e "$release_dir" ]]; then
+  rm -rf -- "$release_tmp"
+else
+  mv "$release_tmp" "$release_dir"
+fi
+
+gateway_image="turtle-gpt-gateway:git-$SHA"
+webui_image="turtle-gpt-open-webui:git-$SHA"
+if [[ $bundle_mode == source ]]; then
+  log "building application images from exact source release"
+  DOCKER_BUILDKIT=1 docker build \
+    --label "org.opencontainers.image.revision=$SHA" \
+    --tag "$gateway_image" \
+    "$release_dir"
+  DOCKER_BUILDKIT=1 docker build \
+    --label "org.opencontainers.image.revision=$SHA" \
+    --tag "$webui_image" \
+    "$release_dir/branding/open-webui"
+else
+  log "loading legacy prebuilt application images"
+  zstd --decompress --stdout "$bundle_dir/images.tar.zst" | docker load >/dev/null
+fi
+docker image inspect "$gateway_image" "$webui_image" >/dev/null
+if [[ $bundle_mode == source ]]; then
+  [[ $(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$gateway_image") == "$SHA" ]] ||
+    fail "Gateway image revision label mismatch"
+  [[ $(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$webui_image") == "$SHA" ]] ||
+    fail "Open WebUI image revision label mismatch"
+fi
+
+active_slot=blue
+if [[ -f "$STATE_DIR/active-slot" ]]; then
+  active_slot=$(<"$STATE_DIR/active-slot")
+fi
+[[ $active_slot == blue || $active_slot == green ]] || fail "active slot state is invalid"
+if [[ $active_slot == blue ]]; then
+  candidate_slot=green
+else
+  candidate_slot=blue
+fi
+active_release=""
+if [[ -f "$STATE_DIR/active-release" ]]; then
+  active_release=$(<"$STATE_DIR/active-release")
+  [[ $active_release =~ ^[0-9a-f]{40}$ ]] || fail "active release state is invalid"
+fi
+
+timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+backup_dir="$BACKUPS_DIR/${timestamp}-auto-${SHORT_SHA}"
+mkdir -p "$backup_dir"
+chmod 0700 "$backup_dir"
+cp -p "$APP_DIR/.env" "$backup_dir/production.env"
+cp -p "$STATE_DIR/slots.env" "$backup_dir/slots.env"
+cp -p "$STATE_DIR/router/default.conf" "$backup_dir/router.conf"
+[[ ! -f "$STATE_DIR/active-slot" ]] || cp -p "$STATE_DIR/active-slot" "$backup_dir/active-slot"
+[[ ! -f "$STATE_DIR/active-release" ]] || cp -p "$STATE_DIR/active-release" "$backup_dir/active-release"
+chmod 0600 "$backup_dir"/*
+
+log "creating a scoped PostgreSQL backup"
+docker exec turtle-gpt-postgres-1 pg_dump -U turtle -d turtle -Fc >"$backup_dir/turtle.dump"
+docker exec -i turtle-gpt-postgres-1 pg_restore --list <"$backup_dir/turtle.dump" >/dev/null
+chmod 0600 "$backup_dir/turtle.dump"
+
+update_slot_images() {
+  local slot=$1
+  local temp_file="$STATE_DIR/slots.env.tmp"
+  awk -v slot="$slot" '
+    BEGIN {
+      gateway = "GATEWAY_" toupper(slot) "_IMAGE="
+      webui = "OPEN_WEBUI_" toupper(slot) "_IMAGE="
+    }
+    index($0, gateway) != 1 && index($0, webui) != 1 { print }
+  ' "$STATE_DIR/slots.env" >"$temp_file"
+  printf 'GATEWAY_%s_IMAGE=%s\n' "${slot^^}" "$gateway_image" >>"$temp_file"
+  printf 'OPEN_WEBUI_%s_IMAGE=%s\n' "${slot^^}" "$webui_image" >>"$temp_file"
+  chmod 0600 "$temp_file"
+  mv "$temp_file" "$STATE_DIR/slots.env"
+}
+
+compose() {
+  docker compose \
+    --project-name "$PROJECT_NAME" \
+    --env-file "$APP_DIR/.env" \
+    --env-file "$STATE_DIR/slots.env" \
+    --file "$COMPOSE_FILE" "$@"
+}
+
+container_id() {
+  compose ps --quiet "$1"
+}
+
+wait_healthy() {
+  local service=$1
+  local attempts=${2:-72}
+  local id
+  local state
+  for ((i = 1; i <= attempts; i++)); do
+    id=$(container_id "$service")
+    if [[ -n $id ]]; then
+      state=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id")
+      if [[ $state == healthy ]]; then
+        return 0
+      fi
+      if [[ $state == exited || $state == dead ]]; then
+        return 1
+      fi
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+direct_probe() {
+  local service=$1
+  local port=$2
+  local path=$3
+  docker exec "$(container_id router)" \
+    wget -q -T 15 -O /dev/null "http://${service}:${port}${path}"
+}
+
+render_router() {
+  local slot=$1
+  local destination=$2
+  sed "s/__TURTLE_SLOT__/$slot/g" "$ROUTER_TEMPLATE" >"$destination"
+  chmod 0644 "$destination"
+}
+
+rollback_router() {
+  log "rolling traffic back to $active_slot"
+  render_router "$active_slot" "$STATE_DIR/router/default.conf.rollback"
+  mv "$STATE_DIR/router/default.conf.rollback" "$STATE_DIR/router/default.conf"
+  docker exec "$(container_id router)" nginx -t >/dev/null
+  docker exec "$(container_id router)" nginx -s reload
+}
+
+update_slot_images "$candidate_slot"
+log "starting candidate slot $candidate_slot"
+compose up -d --no-build --no-deps "gateway-$candidate_slot"
+wait_healthy "gateway-$candidate_slot" 72 || fail "candidate Gateway did not become healthy"
+compose up -d --no-build --no-deps "open-webui-$candidate_slot"
+wait_healthy "open-webui-$candidate_slot" 120 || fail "candidate Open WebUI did not become healthy"
+direct_probe "gateway-$candidate_slot" 8000 /healthz || fail "candidate Gateway direct probe failed"
+direct_probe "open-webui-$candidate_slot" 8080 /health || fail "candidate Open WebUI direct probe failed"
+
+log "switching new connections to $candidate_slot"
+render_router "$candidate_slot" "$STATE_DIR/router/default.conf.candidate"
+cp -p "$STATE_DIR/router/default.conf" "$STATE_DIR/router/default.conf.previous"
+mv "$STATE_DIR/router/default.conf.candidate" "$STATE_DIR/router/default.conf"
+if ! docker exec "$(container_id router)" nginx -t >/dev/null; then
+  mv "$STATE_DIR/router/default.conf.previous" "$STATE_DIR/router/default.conf"
+  fail "router candidate configuration is invalid"
+fi
+docker exec "$(container_id router)" nginx -s reload
+
+if ! curl -fsS --max-time 20 http://172.18.0.1:33010/health >/dev/null ||
+   ! curl -fsS --max-time 20 http://127.0.0.1:38010/healthz >/dev/null; then
+  rollback_router
+  fail "post-switch health probe failed"
+fi
+rm -f "$STATE_DIR/router/default.conf.previous"
+
+printf '%s\n' "$candidate_slot" >"$STATE_DIR/active-slot.tmp"
+mv "$STATE_DIR/active-slot.tmp" "$STATE_DIR/active-slot"
+printf '%s\n' "$SHA" >"$STATE_DIR/active-release.tmp"
+mv "$STATE_DIR/active-release.tmp" "$STATE_DIR/active-release"
+printf '%s\n' "$timestamp" >"$STATE_DIR/last-successful-deploy.tmp"
+mv "$STATE_DIR/last-successful-deploy.tmp" "$STATE_DIR/last-successful-deploy"
+
+# Keep the host-side worker source aligned without touching .env, .runtime, or
+# the running Python processes. The new files take effect only on a later
+# controlled worker restart.
+tar -xzf "$bundle_dir/source.tar.gz" -C "$APP_DIR" --no-same-owner --same-permissions
+runuser -u turtlegpt -- test -r "$APP_DIR/scripts/run_gpt4free.py" ||
+  fail "host-side worker launcher is unreadable by turtlegpt"
+runuser -u turtlegpt -- test -r "$APP_DIR/patches/gpt4free-openaiaccount-gpt56.patch" ||
+  fail "host-side worker overlay is unreadable by turtlegpt"
+chown -R root:root "$release_dir"
+
+drain_unit="turtle-gpt-drain-${SHORT_SHA}-${active_slot}"
+if [[ -n $active_release ]]; then
+  systemd-run \
+    --quiet \
+    --collect \
+    --unit "$drain_unit" \
+    --on-active="${DRAIN_SECONDS}s" \
+    "$DEPLOY_ROOT/bin/stop-inactive-slot" "$active_slot" "$active_release" || true
+fi
+
+log "release $SHORT_SHA is active on $candidate_slot; $active_slot drains for ${DRAIN_SECONDS}s"

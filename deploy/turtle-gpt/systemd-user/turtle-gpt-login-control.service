@@ -1,0 +1,25 @@
+[Unit]
+Description=Turtle Chat loopback login control
+After=network-online.target turtle-gpt-xvfb.service turtle-gpt-vnc.service
+Wants=network-online.target turtle-gpt-xvfb.service turtle-gpt-vnc.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/turtle-gpt/app
+EnvironmentFile=/opt/turtle-gpt/app/.env
+Environment=DISPLAY=:99
+Environment=TURTLE_LOGIN_SERVICE_MANAGER=systemd-user
+Environment=TURTLE_LOGIN_LAUNCH_AGENTS_DIR=/opt/turtle-gpt/home/.config/systemd/user
+Environment=TURTLE_LOGIN_MODE=remote_browser
+Environment=TURTLE_REMOTE_BROWSER_PUBLIC_URL=https://chat.turtleligpt.com/__turtle_login/connect
+Environment=TURTLE_REMOTE_BROWSER_SESSION_STORE=/opt/turtle-gpt/app/.runtime/remote-browser-sessions.json
+Environment=TURTLE_REMOTE_BROWSER_TTL_SECONDS=600
+ExecStart=/opt/turtle-gpt/app/.venv/bin/python -m chatgpt_web_gateway.login_control
+Restart=always
+RestartSec=5
+UMask=0077
+StandardOutput=append:/opt/turtle-gpt/app/.runtime/logs/login-control.stdout.log
+StandardError=append:/opt/turtle-gpt/app/.runtime/logs/login-control.stderr.log
+
+[Install]
+WantedBy=default.target

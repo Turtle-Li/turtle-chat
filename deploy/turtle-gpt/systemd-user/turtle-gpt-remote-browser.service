@@ -1,0 +1,24 @@
+[Unit]
+Description=Turtle Chat one-time remote login broker
+After=network-online.target turtle-gpt-vnc.service
+Wants=network-online.target turtle-gpt-vnc.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/turtle-gpt/app
+EnvironmentFile=/opt/turtle-gpt/app/.env
+Environment=TURTLE_REMOTE_BROWSER_BIND_HOST=172.18.0.1
+Environment=TURTLE_REMOTE_BROWSER_PORT=36080
+Environment=TURTLE_REMOTE_BROWSER_VNC_HOST=127.0.0.1
+Environment=TURTLE_REMOTE_BROWSER_VNC_PORT=35900
+Environment=TURTLE_REMOTE_BROWSER_SESSION_STORE=/opt/turtle-gpt/app/.runtime/remote-browser-sessions.json
+Environment=TURTLE_NOVNC_ROOT=/usr/share/novnc
+ExecStart=/opt/turtle-gpt/app/.venv/bin/python -m chatgpt_web_gateway.remote_browser_broker
+Restart=always
+RestartSec=5
+UMask=0077
+StandardOutput=append:/opt/turtle-gpt/app/.runtime/logs/remote-browser.stdout.log
+StandardError=append:/opt/turtle-gpt/app/.runtime/logs/remote-browser.stderr.log
+
+[Install]
+WantedBy=default.target

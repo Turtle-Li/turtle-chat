@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07131f" />
+    <meta name="robots" content="noindex,nofollow" />
+    <title>管理控制台 · Turtle’s Chat</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/turtle-admin.css?v=20260725.10" />
+    <script defer src="/static/turtle-admin.js?v=20260725.11"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#admin-content">跳到主要内容</a>
+    <div id="turtle-admin-app" class="admin-app" data-ready="false">
+      <aside class="admin-sidebar" aria-label="管理后台导航">
+        <div class="admin-brand">
+          <img src="/static/turtle-gpt-logo.webp?v=20260725.5" alt="" />
+          <span><strong>Turtle’s Chat</strong><small>ADMIN CONSOLE</small></span>
+        </div>
+
+        <nav class="admin-nav">
+          <span class="admin-nav-section">运营</span>
+          <button type="button" data-route="overview">
+            <i>总</i><span><strong>总览</strong><small>状态与关键数据</small></span>
+          </button>
+          <button type="button" data-route="announcements">
+            <i>告</i><span><strong>公告</strong><small>首次进入与订阅说明</small></span>
+          </button>
+          <button type="button" data-route="operations">
+            <i>运</i><span><strong>运维监控</strong><small>时延、异常与资源</small></span>
+          </button>
+          <button type="button" data-route="projectApi">
+            <i>钥</i><span><strong>项目 API</strong><small>权限、密钥与用量</small></span>
+          </button>
+          <button type="button" data-route="providers">
+            <i>源</i><span><strong>Provider</strong><small>ChatGPT 与 Claude</small></span>
+          </button>
+          <button type="button" data-route="users">
+            <i>人</i><span><strong>用户</strong><small>资料与系统角色</small></span>
+          </button>
+          <button type="button" data-route="subscriptions">
+            <i>订</i><span><strong>订阅管理</strong><small>激活、功能与有效期</small></span>
+            <em id="pending-nav-badge" hidden>0</em>
+          </button>
+          <button type="button" data-route="access">
+            <i>组</i><span><strong>分组策略</strong><small>空间、并发与额度</small></span>
+          </button>
+
+          <span class="admin-nav-section">基础设施</span>
+          <button type="button" data-route="storage">
+            <i>存</i><span><strong>存储</strong><small>COS 与媒体链路</small></span>
+          </button>
+          <button type="button" data-route="system">
+            <i>系</i><span><strong>系统</strong><small>运行边界与高级项</small></span>
+          </button>
+        </nav>
+
+        <div class="admin-sidebar-footer">
+          <div class="sidebar-health" id="sidebar-health" data-state="loading">
+            <span></span><div><strong>正在检查服务</strong><small>读取运行状态…</small></div>
+          </div>
+          <a href="/" class="sidebar-chat-link">返回聊天页面</a>
+        </div>
+      </aside>
+
+      <button class="sidebar-scrim" type="button" data-close-sidebar aria-label="关闭导航"></button>
+
+      <div class="admin-workspace">
+        <header class="admin-topbar">
+          <button class="mobile-menu" type="button" data-toggle-sidebar aria-label="打开导航">菜单</button>
+          <div class="admin-page-heading">
+            <span id="page-eyebrow">OPERATIONS</span>
+            <h1 id="page-title">管理总览</h1>
+          </div>
+          <div class="admin-topbar-actions">
+            <a href="/" class="primary-link">打开聊天</a>
+            <button type="button" class="admin-identity" id="admin-identity" aria-label="当前管理员">
+              <span>管</span><i><strong>管理员</strong><small>正在验证</small></i>
+            </button>
+          </div>
+        </header>
+
+        <main id="admin-content" class="admin-content" tabindex="-1">
+          <section class="page-loading" aria-live="polite">
+            <div class="loading-message"><span aria-hidden="true"></span><div><strong>正在加载管理总览</strong><small>页面框架已经就绪，各数据模块正在异步读取</small></div></div>
+            <div class="loading-title"></div>
+            <div class="loading-stats"><span></span><span></span><span></span><span></span></div>
+            <div class="loading-grid"><span></span><span></span></div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="admin-drawer" class="admin-drawer" hidden>
+      <button class="drawer-scrim" type="button" data-close-drawer aria-label="关闭面板"></button>
+      <section class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+        <header>
+          <div><span id="drawer-eyebrow">DETAILS</span><h2 id="drawer-title">详细设置</h2></div>
+          <button type="button" class="drawer-close" data-close-drawer aria-label="关闭">关闭</button>
+        </header>
+        <div id="drawer-body" class="drawer-body"></div>
+        <footer id="drawer-footer" class="drawer-footer"></footer>
+      </section>
+    </div>
+
+    <div id="admin-modal" class="admin-modal" hidden>
+      <button class="modal-scrim" type="button" data-close-modal aria-label="关闭弹窗"></button>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <header>
+          <div><span id="modal-eyebrow">PROJECT API</span><h2 id="modal-title">操作确认</h2></div>
+          <button type="button" class="modal-close" data-close-modal aria-label="关闭">×</button>
+        </header>
+        <div id="modal-body" class="modal-body"></div>
+        <footer id="modal-footer" class="modal-footer"></footer>
+      </section>
+    </div>
+
+    <div id="admin-toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+  </body>
+</html>

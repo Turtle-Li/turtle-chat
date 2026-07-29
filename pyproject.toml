@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chatgpt-web-gateway-poc"
+version = "0.1.0"
+description = "Local-only OpenAI-compatible feasibility gateway for a ChatGPT subscription upstream"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.27,<1",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic>=2.8,<3",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+claude = [
+  "curl-cffi>=0.15,<1",
+  "websockets>=16,<17",
+]
+test = [
+  "pytest>=8.3,<9",
+]
+
+[project.scripts]
+chatgpt-web-gateway = "chatgpt_web_gateway.__main__:main"
+chatgpt-web-chrome = "chatgpt_web_gateway.chrome_launcher:main"
+turtle-login-control = "chatgpt_web_gateway.login_control:main"
+turtle-remote-browser = "chatgpt_web_gateway.remote_browser_broker:main"
+turtle-claude-worker = "claude_web_worker.__main__:main"
+turtle-claude-login = "claude_web_worker.login:main"
+turtle-claude-verify = "claude_web_worker.verify:main"
+turtle-media-pump = "turtle_media_pump.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chatgpt_web_gateway", "src/claude_web_worker", "src/turtle_media_pump"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
