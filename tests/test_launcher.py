@@ -405,16 +405,21 @@ def test_gpt4free_overlay_runs_independent_preflight_requests_in_parallel() -> N
     )
 
 
-def test_gpt4free_overlay_singleflights_short_homepage_warm_cache() -> None:
+def test_gpt4free_overlay_prewarms_homepage_and_reuses_bounded_http_session() -> None:
     overlay = (LAUNCHER_PATH.parents[1] / "patches/gpt4free-openaiaccount-gpt56.patch").read_text(
         encoding="utf-8"
     )
 
-    assert "+    _turtle_home_warm_ttl_seconds: float = 30.0" in overlay
+    assert "+    _turtle_home_warm_ttl_seconds: float = 300.0" in overlay
     assert '+        """Single-flight a short-lived authenticated homepage warm-up."""' in overlay
     assert "+        async with cls._turtle_home_warm_lock:" in overlay
     assert "+                    cls._turtle_home_warmed_at = 0.0" in overlay
     assert "+                await cls._warm_home(session, auth_result)" in overlay
+    assert "+            await cls._warm_home(session, auth)" in overlay
+    assert "+    _turtle_http_max_clients: int = 32" in overlay
+    assert '+        """Reuse bounded per-account HTTP connections across chat turns."""' in overlay
+    assert "+                max_clients=cls._turtle_http_max_clients," in overlay
+    assert "+        async with cls._persistent_session(" in overlay
 
 
 def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() -> None:
