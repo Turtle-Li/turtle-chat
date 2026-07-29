@@ -11,6 +11,7 @@ tool_policy = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(tool_policy)
 
 should_enable_builtin_tools = tool_policy.should_enable_builtin_tools
+builtin_tool_reasons = tool_policy.builtin_tool_reasons
 
 
 def test_plain_conversation_uses_fast_path() -> None:
@@ -65,6 +66,16 @@ def test_workspace_intent_without_toggle_keeps_builtin_tools() -> None:
 
 def test_patcher_wires_policy_before_builtin_resolution() -> None:
     patcher = (OPEN_WEBUI_BRANDING / "patch_open_webui.py").read_text(encoding="utf-8")
-    assert "from open_webui.turtle_chat.tool_policy import should_enable_builtin_tools" in patcher
-    assert "should_enable_builtin_tools(" in patcher
+    assert "from open_webui.turtle_chat.tool_policy import builtin_tool_reasons" in patcher
+    assert "builtin_tool_reasons_for_turn = builtin_tool_reasons(" in patcher
     assert "model_knowledge=get_attached_knowledge(model, metadata)" in patcher
+    assert "turtle_builtin_tool_policy enabled=%s reasons=%s" in patcher
+
+
+def test_reason_labels_do_not_include_user_values() -> None:
+    assert builtin_tool_reasons(
+        prompt="搜索我的聊天",
+        features={"web_search": True},
+        files=[{"name": "private-name.txt"}],
+        tool_ids=["private-tool-id"],
+    ) == ("features", "files", "selected_tools", "workspace_intent")

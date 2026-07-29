@@ -2127,7 +2127,7 @@ replace_once(
     visible_stream_output,
 )
 from open_webui.turtle_storage.pump import strict_media_mode
-from open_webui.turtle_chat.tool_policy import should_enable_builtin_tools
+from open_webui.turtle_chat.tool_policy import builtin_tool_reasons
 from open_webui.utils.filter import (
 """,
 )
@@ -2144,21 +2144,27 @@ replace_once(
     """    note_chat = bool(
         chat and (chat.meta or {}).get('internal') is True and (chat.meta or {}).get('type') == 'note'
     )
+    builtin_tool_reasons_for_turn = builtin_tool_reasons(
+        prompt=get_last_user_message(form_data.get('messages', [])),
+        features=features,
+        files=files,
+        skill_ids=skill_ids,
+        tool_ids=tool_ids,
+        terminal_id=terminal_id,
+        tool_servers=metadata.get('tool_servers'),
+        model_knowledge=get_attached_knowledge(model, metadata),
+        note_chat=note_chat,
+    )
     use_builtin_tools = note_chat or (
         bool(metadata.get('session_id'))
         and metadata.get('params', {}).get('function_calling') != 'legacy'
         and (model.get('info', {}).get('meta', {}).get('capabilities') or {}).get('builtin_tools', True)
-        and should_enable_builtin_tools(
-            prompt=get_last_user_message(form_data.get('messages', [])),
-            features=features,
-            files=files,
-            skill_ids=skill_ids,
-            tool_ids=tool_ids,
-            terminal_id=terminal_id,
-            tool_servers=metadata.get('tool_servers'),
-            model_knowledge=get_attached_knowledge(model, metadata),
-            note_chat=note_chat,
-        )
+        and bool(builtin_tool_reasons_for_turn)
+    )
+    log.info(
+        'turtle_builtin_tool_policy enabled=%s reasons=%s',
+        use_builtin_tools,
+        ','.join(builtin_tool_reasons_for_turn) or 'plain',
     )
 """,
 )

@@ -43,7 +43,7 @@ def _has_items(value: Any) -> bool:
     return bool(value)
 
 
-def should_enable_builtin_tools(
+def builtin_tool_reasons(
     *,
     prompt: str | None,
     features: Mapping[str, Any] | None = None,
@@ -54,7 +54,35 @@ def should_enable_builtin_tools(
     tool_servers: Sequence[Any] | None = None,
     model_knowledge: Sequence[Any] | None = None,
     note_chat: bool = False,
-) -> bool:
+) -> tuple[str, ...]:
+    """Return sanitized reasons for enabling Open WebUI's builtin tools."""
+
+    reasons: list[str] = []
+
+    if note_chat:
+        reasons.append("note_chat")
+
+    if features and any(bool(value) for value in features.values()):
+        reasons.append("features")
+
+    for reason, value in (
+        ("files", files),
+        ("skills", skill_ids),
+        ("selected_tools", tool_ids),
+        ("terminal", terminal_id),
+        ("tool_servers", tool_servers),
+        ("model_knowledge", model_knowledge),
+    ):
+        if _has_items(value):
+            reasons.append(reason)
+
+    if prompt and _WORKSPACE_TOOL_INTENT.search(prompt):
+        reasons.append("workspace_intent")
+
+    return tuple(reasons)
+
+
+def should_enable_builtin_tools(**kwargs: Any) -> bool:
     """Return whether this UI turn needs Open WebUI's large builtin tool set.
 
     Open WebUI 0.11 enables dozens of workspace tools for every browser turn.
@@ -64,23 +92,4 @@ def should_enable_builtin_tools(
     automatic workspace actions that have no composer toggle.
     """
 
-    if note_chat:
-        return True
-
-    if features and any(bool(value) for value in features.values()):
-        return True
-
-    if any(
-        _has_items(value)
-        for value in (
-            files,
-            skill_ids,
-            tool_ids,
-            terminal_id,
-            tool_servers,
-            model_knowledge,
-        )
-    ):
-        return True
-
-    return bool(prompt and _WORKSPACE_TOOL_INTENT.search(prompt))
+    return bool(builtin_tool_reasons(**kwargs))
