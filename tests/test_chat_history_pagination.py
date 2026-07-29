@@ -43,6 +43,9 @@ def test_exact_chat_reads_are_rerouted_to_the_paged_history_api():
     assert "c().turtlePage?.hasMore&&" not in patcher
     assert "while(K&&L<=b())" in patcher
     assert "return L<=b()" in patcher
+    assert "TURTLE_ASSET_VERSION" in patcher
+    assert "version_immutable_module_references" in patcher
+    assert "Path(\"/app/build/_app/immutable\").rglob(\"*.js\")" in patcher
     assert "sync_chat_history_index" in patcher
 
 

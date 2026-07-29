@@ -1,7 +1,20 @@
 """Apply the small version-checked Turtle's Chat Open WebUI patch."""
 
+import hashlib
 import re
 from pathlib import Path
+
+
+_asset_version_hasher = hashlib.sha256()
+for _asset_version_path in (
+    Path(__file__),
+    Path("/tmp/turtle-client-read-cache.js"),
+    Path("/app/build/static/custom.css"),
+    Path("/app/build/static/turtle-model-controls.js"),
+    Path("/app/build/static/turtle-storage-controls.js"),
+):
+    _asset_version_hasher.update(_asset_version_path.read_bytes())
+TURTLE_ASSET_VERSION = _asset_version_hasher.hexdigest()[:16]
 
 
 def replace_once(path: Path, before: str, after: str) -> None:
@@ -2406,6 +2419,66 @@ replace_once(
                                 {'done': True},
                             )
 
-                    selected_chat_models = user_message.get('models') if isinstance(user_message, dict) else None
+    selected_chat_models = user_message.get('models') if isinstance(user_message, dict) else None
 """,
 )
+
+
+# Open WebUI's base build correctly gives content-hashed modules a one-year
+# immutable cache. Turtle patches some compiled modules after that hash was
+# assigned, so the original URL can otherwise keep an older patched body in a
+# browser or CDN for a year. Version every JavaScript module edge and the root
+# entry references with one content-derived query. Each release remains highly
+# cacheable, while a changed Turtle frontend obtains a new module graph URL.
+immutable_module_reference = re.compile(
+    r"(?P<quote>[\"'`])"
+    r"(?P<url>(?:/_app/immutable/|\./|\.\./)[^\"'`]+?\.js)"
+    r"(?P=quote)"
+)
+
+
+def version_immutable_module_references(path: Path) -> int:
+    source = path.read_text(encoding="utf-8")
+    updated, replacements = immutable_module_reference.subn(
+        lambda match: (
+            f"{match.group('quote')}{match.group('url')}"
+            f"?v={TURTLE_ASSET_VERSION}{match.group('quote')}"
+        ),
+        source,
+    )
+    if replacements:
+        path.write_text(updated, encoding="utf-8")
+    return replacements
+
+
+module_reference_count = sum(
+    version_immutable_module_references(module_path)
+    for module_path in Path("/app/build/_app/immutable").rglob("*.js")
+)
+index_module_reference_count = version_immutable_module_references(index_path)
+if not module_reference_count or not index_module_reference_count:
+    raise RuntimeError(
+        "Unable to version Open WebUI's immutable module graph. "
+        "The base image likely changed and the cache-busting patch needs review."
+    )
+
+index_source = index_path.read_text(encoding="utf-8")
+static_reference = re.compile(
+    r"(?P<quote>[\"'])"
+    r"(?P<url>/static/(?:custom\.css|turtle-model-controls\.js|"
+    r"turtle-storage-controls\.js))(?:\?v=[^\"']*)?"
+    r"(?P=quote)"
+)
+index_source, static_reference_count = static_reference.subn(
+    lambda match: (
+        f"{match.group('quote')}{match.group('url')}"
+        f"?v={TURTLE_ASSET_VERSION}{match.group('quote')}"
+    ),
+    index_source,
+)
+if static_reference_count != 3:
+    raise RuntimeError(
+        "Unable to version Turtle's root stylesheet and controls. "
+        f"Expected 3 references, found {static_reference_count}."
+    )
+index_path.write_text(index_source, encoding="utf-8")
