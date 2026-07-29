@@ -379,7 +379,29 @@ def test_gpt4free_overlay_retries_only_pre_message_403_requests() -> None:
     assert "+                if response.status == 403 and attempt < 4:" in overlay
     assert overlay.count("_safe_request_json(") == 4
     assert "+                    proof_token = auth_result.proof_token = get_config(user_agent)" in overlay
-    assert "+                    json_data={\"p\": get_requirements_token(proof_token)}," in overlay
+    assert "+                        json_data={\"p\": get_requirements_token(proof_token)}," in overlay
+
+
+def test_gpt4free_overlay_runs_independent_preflight_requests_in_parallel() -> None:
+    overlay = (LAUNCHER_PATH.parents[1] / "patches/gpt4free-openaiaccount-gpt56.patch").read_text(
+        encoding="utf-8"
+    )
+
+    assert "+                    async with asyncio.TaskGroup() as preflight:" in overlay
+    assert (
+        "+                        prepare_task = preflight.create_task(request_prepare())"
+        in overlay
+    )
+    assert (
+        "+                        requirements_task = preflight.create_task("
+        in overlay
+    )
+    assert "+                    prepared, prepare_ms = prepare_task.result()" in overlay
+    assert (
+        "+                    chat_requirements, requirements_ms = "
+        "requirements_task.result()"
+        in overlay
+    )
 
 
 def test_gpt4free_overlay_singleflights_short_homepage_warm_cache() -> None:

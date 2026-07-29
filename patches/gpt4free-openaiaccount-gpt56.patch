@@ -1,5 +1,5 @@
 diff --git a/g4f/Provider/needs_auth/OpenaiChat.py b/g4f/Provider/needs_auth/OpenaiChat.py
-index 36d75ec..d1325b9 100644
+index 36d75ec..95ce811 100644
 --- a/g4f/Provider/needs_auth/OpenaiChat.py
 +++ b/g4f/Provider/needs_auth/OpenaiChat.py
 @@ -4,15 +4,19 @@ import asyncio
@@ -2032,7 +2032,7 @@ index 36d75ec..d1325b9 100644
              if conversation_mode is None:
                  _gizmo_id = kwargs.get("gizmo_id")
                  if _gizmo_id:
-@@ -457,18 +2258,32 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -457,22 +2258,37 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  else:
                      conversation_mode = {"kind": "primary_assistant"}
  
@@ -2067,23 +2067,26 @@ index 36d75ec..d1325b9 100644
 +                    yield Reasoning(status="正在搜索网页")
              while conversation.finish_reason is None:
                  conduit_token = None
++                prepare_data = None
                  if cls._api_key is not None:
-@@ -484,34 +2299,49 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+-                    data = {
++                    prepare_data = {
+                         "action": "next",
+                         "fork_from_shared_post": False,
+                         "parent_message_id": conversation.message_id,
+@@ -484,34 +2300,65 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          "supports_buffering": True,
                          "supported_encodings": ["v1"]
                      }
 +                    if web_thinking_effort is not None:
-+                        data["thinking_effort"] = web_thinking_effort
++                        prepare_data["thinking_effort"] = web_thinking_effort
                      if temporary:
-                         data["history_and_training_disabled"] = True
+-                        data["history_and_training_disabled"] = True
++                        prepare_data["history_and_training_disabled"] = True
                      if conversation.conversation_id is not None and not temporary:
-                         data["conversation_id"] = conversation.conversation_id
+-                        data["conversation_id"] = conversation.conversation_id
 -                    async with session.post(
-+                    prepare_started = time.monotonic()
-+                    prepared = await cls._safe_request_json(
-+                        session,
-+                        auth_result,
-                         prepare_url,
+-                        prepare_url,
 -                        json=data,
 -                        headers=cls._headers
 -                    ) as response:
@@ -2106,34 +2109,56 @@ index 36d75ec..d1325b9 100644
 -                    need_turnstile = chat_requirements.get("turnstile", {}).get("required", False)
 -                    need_arkose = chat_requirements.get("arkose", {}).get("required", False)
 -                    chat_token = chat_requirements.get("token")
-+                        method="POST",
-+                        json_data=data,
-+                        headers=cls._headers,
-+                    )
-+                    conversation.turtle_upstream_stage_metrics["prepare_ms"] += (
-+                        _elapsed_ms(prepare_started)
-+                    )
-+                    conduit_token = prepared["conduit_token"]
++                        prepare_data["conversation_id"] = conversation.conversation_id
 +                user_agent = getattr(auth_result, "headers", {}).get("user-agent")
 +                proof_token = getattr(auth_result, "proof_token", None)
 +                if proof_token is None:
 +                    proof_token = auth_result.proof_token = get_config(user_agent)
-+                requirements_started = time.monotonic()
-+                chat_requirements = await cls._safe_request_json(
-+                    session,
-+                    auth_result,
-+                    (
-+                        f"{cls.url}/backend-anon/sentinel/chat-requirements"
-+                        if cls._api_key is None else
-+                        f"{cls.url}/backend-api/sentinel/chat-requirements"
-+                    ),
-+                    method="POST",
-+                    json_data={"p": get_requirements_token(proof_token)},
-+                    headers=cls._headers,
-+                    auth_error=True,
-+                )
++
++                async def request_requirements():
++                    requirements_started = time.monotonic()
++                    result = await cls._safe_request_json(
++                        session,
++                        auth_result,
++                        (
++                            f"{cls.url}/backend-anon/sentinel/chat-requirements"
++                            if cls._api_key is None else
++                            f"{cls.url}/backend-api/sentinel/chat-requirements"
++                        ),
++                        method="POST",
++                        json_data={"p": get_requirements_token(proof_token)},
++                        headers=cls._headers,
++                        auth_error=True,
++                    )
++                    return result, _elapsed_ms(requirements_started)
++
++                prepare_ms = 0
++                if prepare_data is None:
++                    chat_requirements, requirements_ms = await request_requirements()
++                else:
++                    async def request_prepare():
++                        prepare_started = time.monotonic()
++                        result = await cls._safe_request_json(
++                            session,
++                            auth_result,
++                            prepare_url,
++                            method="POST",
++                            json_data=prepare_data,
++                            headers=cls._headers,
++                        )
++                        return result, _elapsed_ms(prepare_started)
++
++                    async with asyncio.TaskGroup() as preflight:
++                        prepare_task = preflight.create_task(request_prepare())
++                        requirements_task = preflight.create_task(
++                            request_requirements()
++                        )
++                    prepared, prepare_ms = prepare_task.result()
++                    chat_requirements, requirements_ms = requirements_task.result()
++                    conduit_token = prepared["conduit_token"]
++                conversation.turtle_upstream_stage_metrics["prepare_ms"] += prepare_ms
 +                conversation.turtle_upstream_stage_metrics["requirements_ms"] += (
-+                    _elapsed_ms(requirements_started)
++                    requirements_ms
 +                )
 +                need_turnstile = chat_requirements.get("turnstile", {}).get("required", False)
 +                need_arkose = chat_requirements.get("arkose", {}).get("required", False)
@@ -2141,7 +2166,7 @@ index 36d75ec..d1325b9 100644
  
                      # if need_arkose and cls.request_config.arkose_token is None:
                  #     await get_request_config(proxy)
-@@ -519,11 +2349,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -519,11 +2366,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  #     cls._set_api_key(auth_result.access_token)
                  #     if auth_result.arkose_token is None:
                  #         raise MissingAuthError("No arkose token found in .har file")
@@ -2154,7 +2179,7 @@ index 36d75ec..d1325b9 100644
                      proofofwork = generate_proof_token(
                          **chat_requirements["proofofwork"],
                          user_agent=user_agent,
-@@ -550,6 +2377,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -550,6 +2394,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                 "screen_height": 1080, "screen_width": 1920},
                      "paragen_cot_summary_display_override": "allow"
                  }
@@ -2163,7 +2188,7 @@ index 36d75ec..d1325b9 100644
                  if temporary:
                      data["history_and_training_disabled"] = True
  
-@@ -584,6 +2413,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -584,6 +2430,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      headers["openai-sentinel-proof-token"] = proofofwork
                  if need_turnstile and getattr(auth_result, "turnstile_token", None) is not None:
                      headers['openai-sentinel-turnstile-token'] = auth_result.turnstile_token
@@ -2172,7 +2197,7 @@ index 36d75ec..d1325b9 100644
                  async with session.post(
                      backend_anon_url
                      if cls._api_key is None else
-@@ -591,20 +2422,59 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -591,20 +2439,59 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      json=data,
                      headers=headers
                  ) as response:
@@ -2234,7 +2259,7 @@ index 36d75ec..d1325b9 100644
                              generated_image = await cls.get_generated_image(session, auth_result, match.group(0),
                                                                              prompt)
                              if generated_image is not None:
-@@ -612,6 +2482,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -612,6 +2499,8 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          async for chunk in cls.iter_messages_line(session, auth_result, line, conversation, sources,
                                                                    references):
                              if isinstance(chunk, str):
@@ -2243,7 +2268,7 @@ index 36d75ec..d1325b9 100644
                                  chunk = chunk.replace("\ue203", "").replace("\ue204", "").replace("\ue206", "")
                                  buffer += chunk
                                  if buffer.find(u"\ue200") != -1:
-@@ -659,23 +2531,33 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -659,23 +2548,33 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                      return f"[[{source_index + 1}]]({link})"
                                                  return f""
  
@@ -2290,7 +2315,7 @@ index 36d75ec..d1325b9 100644
                                              sequence_content = sequence_content.replace("navlist\n", "#### ")
  
                                              # Handle search, news, view and image citations
-@@ -686,10 +2568,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -686,10 +2585,6 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                                  citation_replacer,
                                                  sequence_content
                                              )
@@ -2301,7 +2326,7 @@ index 36d75ec..d1325b9 100644
                                              return sequence_content
  
                                          # process only completed sequences and do not touch start of next not completed sequence
-@@ -702,19 +2580,48 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -702,19 +2597,48 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                          # do not yield to consume rest part of special sequence
                                          continue
  
@@ -2354,7 +2379,7 @@ index 36d75ec..d1325b9 100644
                      conversation.generated_images = None
                  conversation.prompt = None
                  if return_conversation:
-@@ -733,14 +2640,94 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -733,14 +2657,94 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      break
  
              if conversation.task and kwargs.get("wait_media", True):
@@ -2453,7 +2478,7 @@ index 36d75ec..d1325b9 100644
      @classmethod
      async def wss_media(
          cls,
-@@ -801,6 +2788,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -801,6 +2805,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                  conversation.prompt or "",
                                  conversation.conversation_id,
                                  status,
@@ -2461,7 +2486,7 @@ index 36d75ec..d1325b9 100644
                              )
                              if generated_images is not None:
                                  yield generated_images
-@@ -820,11 +2808,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -820,11 +2825,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      ) -> AsyncGenerator[Any, None]:
          start_time = asyncio.get_event_loop().time()
          seen_assets: Set[str] = set()
@@ -2475,7 +2500,7 @@ index 36d75ec..d1325b9 100644
              if timeout is not None:
                  elapsed = asyncio.get_event_loop().time() - start_time
                  if elapsed > timeout:
-@@ -839,33 +2825,47 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -839,33 +2842,47 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
  
              mapping = data.get("mapping") or {}
              if not mapping:
@@ -2542,7 +2567,7 @@ index 36d75ec..d1325b9 100644
                      generated_images = await cls.get_generated_image(
                          session,
                          auth_result,
-@@ -875,13 +2875,188 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -875,13 +2892,188 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          or "",
                          conversation.conversation_id,
                          status,
@@ -2732,7 +2757,7 @@ index 36d75ec..d1325b9 100644
      @classmethod
      async def iter_messages_line(cls, session: StreamSession, auth_result: AuthResult, line: bytes,
                                   fields: Conversation, sources: OpenAISources,
-@@ -896,6 +3071,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -896,6 +3088,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              return
          if not isinstance(line, dict):
              return
@@ -2744,7 +2769,7 @@ index 36d75ec..d1325b9 100644
          if "type" in line:
              if line["type"] == "title_generation":
                  yield TitleGeneration(line["title"])
-@@ -903,11 +3083,29 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -903,11 +3100,29 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
          if fields.p is not None and fields.p.startswith("/message/content/thoughts"):
              if fields.p.endswith("/content"):
                  if fields.thoughts_summary:
@@ -2776,7 +2801,7 @@ index 36d75ec..d1325b9 100644
              return
          if "v" in line:
              v = line.get("v")
-@@ -923,80 +3121,153 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -923,80 +3138,153 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          buffer += m.get("v")
                      elif m.get("p") == "/message/metadata/image_gen_title":
                          fields.prompt = m.get("v")
@@ -2981,7 +3006,7 @@ index 36d75ec..d1325b9 100644
                      elif m.get("p") == "/message/metadata/finished_text":
                          fields.is_thinking = False
                          if buffer:
-@@ -1011,23 +3282,72 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1011,23 +3299,72 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  if fields.conversation_id is None:
                      fields.conversation_id = v.get("conversation_id")
                      debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
@@ -3064,7 +3089,7 @@ index 36d75ec..d1325b9 100644
                          fields.task = v
              return
          if "error" in line and line.get("error"):
-@@ -1090,33 +3410,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1090,33 +3427,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      @classmethod
      async def nodriver_auth(cls, proxy: str = None):
          async with get_nodriver_session(proxy=proxy) as browser:
@@ -3117,7 +3142,7 @@ index 36d75ec..d1325b9 100644
                      )
  
              await page.send(nodriver.cdp.network.enable())
-@@ -1124,29 +3447,31 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1124,29 +3464,31 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              await page.reload()
              user_agent = await page.evaluate("window.navigator.userAgent", return_by_value=True)
              debug.log(f"OpenaiChat: User-Agent: {user_agent}")
@@ -3172,7 +3197,7 @@ index 36d75ec..d1325b9 100644
                  body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
                  if hasattr(body, "value"):
                      body = body.value
-@@ -1159,7 +3484,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1159,7 +3501,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      break
                  await asyncio.sleep(1)
                  debug.log("OpenaiChat: Waiting for access token...")
@@ -3183,7 +3208,7 @@ index 36d75ec..d1325b9 100644
              #while True:
              #    if cls.request_config.proof_token:
              #        break
-@@ -1238,6 +3565,19 @@ class Conversation(JsonConversation):
+@@ -1238,6 +3582,19 @@ class Conversation(JsonConversation):
          self.prompt = None
          self.generated_images: ImagePreview = None
          self.task: dict = None
@@ -3203,7 +3228,7 @@ index 36d75ec..d1325b9 100644
  
  
  def get_cookies(
-@@ -1254,7 +3594,7 @@ def get_cookies(
+@@ -1254,7 +3611,7 @@ def get_cookies(
      return {c["name"]: c["value"] for c in json['cookies']} if 'cookies' in json else {}
  
  
@@ -3212,7 +3237,7 @@ index 36d75ec..d1325b9 100644
      list: List[Dict[str, str]]
  
      def __init__(self, sources: List[Dict[str, str]]) -> None:
-@@ -1294,8 +3634,7 @@ class OpenAISources(ResponseType):
+@@ -1294,8 +3651,7 @@ class OpenAISources(ResponseType):
          return "\n\n\n\n" + ("\n>\n".join([
              f"> [{idx + 1}] {format_link(link['url'], link.get('title', ''))}"
              for idx, link in enumerate(self.list)
@@ -3222,7 +3247,7 @@ index 36d75ec..d1325b9 100644
      def get_ref_info(self, source: Dict[str, str]) -> dict[str, str | int] | None:
          ref_index = source.get("ref_id", {}).get("ref_index", None)
          ref_type = source.get("ref_id", {}).get("ref_type", None)
-@@ -1345,9 +3684,25 @@ class ContentReferences:
+@@ -1345,9 +3701,25 @@ class ContentReferences:
          self.list: List[Dict[str, Any]] = []
  
      def add_reference(self, reference_part: dict) -> None:
@@ -3249,7 +3274,7 @@ index 36d75ec..d1325b9 100644
          while len(self.list) <= idx:
              self.list.append({})
  
-@@ -1357,25 +3712,34 @@ class ContentReferences:
+@@ -1357,25 +3729,34 @@ class ContentReferences:
          while len(self.list) <= idx:
              self.list.append({})
  
