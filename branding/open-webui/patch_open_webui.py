@@ -1045,6 +1045,88 @@ replace_once(
 """,
 )
 
+# Split the browser-to-Gateway interval into sanitized Open WebUI stages.  A
+# short random trace joins only timing lines from one request; no user, chat,
+# prompt, model payload, credential, or upstream identifier is logged.
+replace_once(
+    main_path,
+    """    model_id = form_data.get('model', None)
+    model_item = form_data.pop('model_item', {})
+    tasks = form_data.pop('background_tasks', None)
+
+    if (
+""",
+    """    model_id = form_data.get('model', None)
+    model_item = form_data.pop('model_item', {})
+    tasks = form_data.pop('background_tasks', None)
+    turtle_latency_started = time.perf_counter()
+    turtle_latency_trace = (
+        uuid4().hex[:8] if model_id in {'gpt-5-web', 'claude-web'} else None
+    )
+
+    def turtle_latency_stage(stage):
+        if turtle_latency_trace:
+            log.info(
+                'turtle_chat_stage trace=%s stage=%s elapsed_ms=%d',
+                turtle_latency_trace,
+                stage,
+                int((time.perf_counter() - turtle_latency_started) * 1000),
+            )
+
+    turtle_latency_stage('entry')
+
+    if (
+""",
+)
+replace_once(
+    main_path,
+    """    async def process_chat(request, form_data, user, metadata, model, tasks=None):
+        try:
+            form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
+
+            response = await chat_completion_handler(request, form_data, user)
+""",
+    """    turtle_latency_stage('metadata_ready')
+
+    async def process_chat(request, form_data, user, metadata, model, tasks=None):
+        try:
+            turtle_latency_stage('task_started')
+            form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
+            turtle_latency_stage('payload_ready')
+
+            response = await chat_completion_handler(request, form_data, user)
+            turtle_latency_stage('upstream_ready')
+""",
+)
+replace_once(
+    main_path,
+    """            task_ids.append(task_id)
+
+        if is_internal:
+""",
+    """            task_ids.append(task_id)
+            turtle_latency_stage('task_scheduled')
+
+        if is_internal:
+""",
+)
+replace_once(
+    main_path,
+    """        return {
+            'status': True,
+            'task_ids': task_ids,
+            'chat_id': chat_id,
+        }
+""",
+    """        turtle_latency_stage('ack_ready')
+        return {
+            'status': True,
+            'task_ids': task_ids,
+            'chat_id': chat_id,
+        }
+""",
+)
+
 # Turtle's two deployment-managed aliases are deliberately not persisted as
 # Open WebUI custom-model rows. Native model ACL therefore reports
 # "Model not found" for every ordinary user even after the shared model cache
