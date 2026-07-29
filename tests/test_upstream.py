@@ -147,6 +147,7 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
                         "cdn_hit": 1,
                         "cdn_miss": 1,
                         "fallback_count": 0,
+                        "retry_count": 1,
                         "file_cache_hit": 1,
                         "file_cache_miss": 1,
                         "file_cache_stale": 0,
@@ -158,6 +159,7 @@ class UpstreamResourceMetadataTests(unittest.TestCase):
 
         self.assertEqual(metrics.transfer_bytes, 3_151_219)
         self.assertEqual(metrics.cdn_hit, 1)
+        self.assertEqual(metrics.retry_count, 1)
         self.assertEqual(metrics.file_cache_hit, 1)
 
     def test_rejects_invalid_media_counter_versions_and_values(self) -> None:

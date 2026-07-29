@@ -161,7 +161,7 @@ def _log_upstream_media_metrics(
     if metrics.empty:
         return
     logger.info(
-        "request_media id=%s probe=%d transfer=%d bytes=%d cdn_hit=%d cdn_miss=%d fallback=%d file_reuse=%d file_upload=%d file_stale=%d",
+        "request_media id=%s probe=%d transfer=%d bytes=%d cdn_hit=%d cdn_miss=%d fallback=%d retry=%d file_reuse=%d file_upload=%d file_stale=%d",
         request_id,
         metrics.probe_count,
         metrics.transfer_count,
@@ -169,6 +169,7 @@ def _log_upstream_media_metrics(
         metrics.cdn_hit,
         metrics.cdn_miss,
         metrics.fallback_count,
+        metrics.retry_count,
         metrics.file_cache_hit,
         metrics.file_cache_miss,
         metrics.file_cache_stale,

@@ -3,12 +3,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
 import importlib.util
 import json
 import os
 import sys
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -32,6 +34,7 @@ from g4f.Provider.openai.media_pump import (  # noqa: E402
     MODEL_INPUT_MAX_BYTES,
     MediaPumpError,
     ModelMediaSource,
+    _post_sync,
     open_model_source,
     probe_media,
 )
@@ -102,6 +105,31 @@ class FakeSession:
     def post(self, _url, **_kwargs):
         self.post_count += 1
         return FakeResponse(self.post_payloads.pop(0))
+
+
+class FakeControlResponse:
+    def __init__(self, payload: dict, status: int = 200):
+        self.status = status
+        self.body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self, _limit: int):
+        return self.body
+
+
+def control_http_error(status: int, payload: dict) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        "https://pump.example/v1/probe",
+        status,
+        "test error",
+        {},
+        io.BytesIO(json.dumps(payload).encode("utf-8")),
+    )
 
 
 class ModelSourceEnvelopeTests(unittest.TestCase):
@@ -266,11 +294,13 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
             "height": 1,
             "source": "primary",
             "cdn_cache": "miss",
+            "retry_count": 1,
         }
         transfer = {
             "size": 4,
             "source": "primary",
             "cdn_cache": "hit",
+            "retry_count": 1,
         }
 
         with (
@@ -307,6 +337,7 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.turtle_media_metrics["file_cache_miss"], 1)
         self.assertEqual(conversation.turtle_media_metrics["cdn_miss"], 1)
         self.assertEqual(conversation.turtle_media_metrics["cdn_hit"], 1)
+        self.assertEqual(conversation.turtle_media_metrics["retry_count"], 2)
         self.assertEqual(conversation.turtle_media_metrics["transfer_bytes"], 4)
         self.assertNotIn(PRIVATE_INPUT_FILE_CACHE_ATTR, conversation.get_dict())
 
@@ -362,6 +393,203 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
             post.call_args.args[1]["max_bytes"],
             MODEL_INPUT_MAX_BYTES,
         )
+
+
+class MediaPumpControlRetryTests(unittest.TestCase):
+    def setUp(self):
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "TURTLE_MEDIA_PUMP_URL": "https://pump.example",
+                "TURTLE_MEDIA_PUMP_SECRET": PUMP_SECRET,
+                "TURTLE_MEDIA_PUMP_RETRY_ATTEMPTS": "2",
+            },
+            clear=False,
+        )
+        self.environment.start()
+
+    def tearDown(self):
+        self.environment.stop()
+
+    def test_probe_retries_structured_502_and_uses_a_fresh_control_request(self):
+        failure = control_http_error(
+            502,
+            {
+                "detail": "source probe failed",
+                "code": "source_probe_failed",
+                "phase": "probe",
+                "source": "fallback",
+                "retryable": True,
+            },
+        )
+        success = FakeControlResponse(
+            {
+                "size": 4,
+                "content_type": "image/png",
+                "source": "fallback",
+                "cdn_cache": "unknown",
+            }
+        )
+        observed_nonces = []
+
+        def urlopen(request, **_kwargs):
+            observed_nonces.append(request.get_header("X-turtle-pump-nonce"))
+            if len(observed_nonces) == 1:
+                raise failure
+            return success
+
+        with (
+            patch(
+                "g4f.Provider.openai.media_pump.urllib.request.urlopen",
+                side_effect=urlopen,
+            ),
+            patch("g4f.Provider.openai.media_pump.time.sleep") as sleep,
+            patch(
+                "g4f.Provider.openai.media_pump.random.uniform",
+                return_value=0,
+            ),
+        ):
+            result = _post_sync("/v1/probe", {"source_url": "https://source.example/a"})
+
+        self.assertEqual(result["_control_attempts"], 2)
+        self.assertEqual(len(observed_nonces), 2)
+        self.assertNotEqual(observed_nonces[0], observed_nonces[1])
+        sleep.assert_called_once_with(0.35)
+
+    def test_probe_exposes_only_bounded_failure_context_after_retry(self):
+        failures = [
+            control_http_error(
+                502,
+                {
+                    "detail": "source probe failed",
+                    "code": "source_probe_failed",
+                    "phase": "probe",
+                    "source": "fallback",
+                    "retryable": True,
+                    "source_url": "https://must-not-appear.example/secret",
+                },
+            )
+            for _ in range(2)
+        ]
+        with (
+            patch(
+                "g4f.Provider.openai.media_pump.urllib.request.urlopen",
+                side_effect=failures,
+            ),
+            patch("g4f.Provider.openai.media_pump.time.sleep"),
+            patch(
+                "g4f.Provider.openai.media_pump.random.uniform",
+                return_value=0,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                MediaPumpError,
+                (
+                    "external media pump probe failed after 2 attempts "
+                    r"\(HTTP 502, code=source_probe_failed, source=fallback\)"
+                ),
+            ) as captured:
+                _post_sync("/v1/probe", {"source_url": "https://source.example/a"})
+
+        self.assertNotIn("must-not-appear", str(captured.exception))
+
+    def test_probe_retries_an_unstructured_edge_502_but_not_a_403(self):
+        edge_failure = urllib.error.HTTPError(
+            "https://pump.example/v1/probe",
+            502,
+            "Bad Gateway",
+            {},
+            io.BytesIO(b"<html>edge failure</html>"),
+        )
+        success = FakeControlResponse({"size": 4, "content_type": "image/png"})
+        with (
+            patch(
+                "g4f.Provider.openai.media_pump.urllib.request.urlopen",
+                side_effect=[edge_failure, success],
+            ) as urlopen,
+            patch("g4f.Provider.openai.media_pump.time.sleep"),
+            patch(
+                "g4f.Provider.openai.media_pump.random.uniform",
+                return_value=0,
+            ),
+        ):
+            result = _post_sync("/v1/probe", {"source_url": "https://source.example/a"})
+
+        self.assertEqual(result["_control_attempts"], 2)
+        self.assertEqual(urlopen.call_count, 2)
+
+        forbidden = control_http_error(
+            403,
+            {
+                "detail": "source URL is not allowlisted",
+                "code": "source_url_is_not_allowlisted",
+                "retryable": False,
+            },
+        )
+        with (
+            patch(
+                "g4f.Provider.openai.media_pump.urllib.request.urlopen",
+                side_effect=forbidden,
+            ) as urlopen,
+            patch("g4f.Provider.openai.media_pump.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(MediaPumpError, "HTTP 403"):
+                _post_sync("/v1/probe", {"source_url": "https://source.example/a"})
+
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_transfer_retries_only_a_structured_pre_destination_source_failure(self):
+        source_failure = control_http_error(
+            502,
+            {
+                "detail": "source download failed",
+                "code": "source_download_failed",
+                "phase": "source",
+                "source": "fallback",
+                "retryable": True,
+            },
+        )
+        success = FakeControlResponse({"ok": True, "size": 4})
+        with (
+            patch(
+                "g4f.Provider.openai.media_pump.urllib.request.urlopen",
+                side_effect=[source_failure, success],
+            ) as urlopen,
+            patch("g4f.Provider.openai.media_pump.time.sleep") as sleep,
+            patch(
+                "g4f.Provider.openai.media_pump.random.uniform",
+                return_value=0,
+            ),
+        ):
+            result = _post_sync("/v1/transfers", {"source_url": "https://source.example/a"})
+
+        self.assertEqual(result["_control_attempts"], 2)
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once()
+
+        destination_failure = control_http_error(
+            502,
+            {
+                "detail": "destination upload failed",
+                "code": "destination_upload_failed",
+                "phase": "destination",
+                "source": "fallback",
+                "retryable": False,
+            },
+        )
+        with (
+            patch(
+                "g4f.Provider.openai.media_pump.urllib.request.urlopen",
+                side_effect=destination_failure,
+            ) as urlopen,
+            patch("g4f.Provider.openai.media_pump.time.sleep") as sleep,
+        ):
+            with self.assertRaises(MediaPumpError):
+                _post_sync("/v1/transfers", {"source_url": "https://source.example/a"})
+
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

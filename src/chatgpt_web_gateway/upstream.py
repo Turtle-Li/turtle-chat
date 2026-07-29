@@ -44,6 +44,7 @@ class UpstreamMediaMetrics:
     cdn_hit: int = 0
     cdn_miss: int = 0
     fallback_count: int = 0
+    retry_count: int = 0
     file_cache_hit: int = 0
     file_cache_miss: int = 0
     file_cache_stale: int = 0
@@ -58,6 +59,7 @@ class UpstreamMediaMetrics:
                 self.cdn_hit,
                 self.cdn_miss,
                 self.fallback_count,
+                self.retry_count,
                 self.file_cache_hit,
                 self.file_cache_miss,
                 self.file_cache_stale,
@@ -626,6 +628,7 @@ def extract_upstream_media_metrics(
         cdn_hit=counter("cdn_hit", 20_000),
         cdn_miss=counter("cdn_miss", 20_000),
         fallback_count=counter("fallback_count", 20_000),
+        retry_count=counter("retry_count", 20_000),
         file_cache_hit=counter("file_cache_hit", 10_000),
         file_cache_miss=counter("file_cache_miss", 10_000),
         file_cache_stale=counter("file_cache_stale", 10_000),

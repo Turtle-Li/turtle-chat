@@ -390,7 +390,11 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert '+MODEL_SOURCE_CONTEXT = b"turtle-model-source-v1\\0"' in overlay
     assert "+MODEL_INPUT_MAX_BYTES = 20 * 1024**2" in overlay
     assert "+class ModelMediaSource:" in overlay
+    assert "+class MediaPumpRequestError(MediaPumpError):" in overlay
     assert "+def open_model_source(image_url: Any) -> ModelMediaSource:" in overlay
+    assert '+        attempts = int(os.getenv("TURTLE_MEDIA_PUMP_RETRY_ATTEMPTS", "2"))' in overlay
+    assert '+        path == "/v1/transfers"' in overlay
+    assert '+        "retry_count": max(0, int(result.get("_control_attempts") or 1) - 1),' in overlay
     assert '+PRIVATE_INPUT_FILE_CACHE_ATTR = "__turtle_input_file_cache"' in overlay
     assert '+                        f"{cls.url}/backend-api/files/{cached[\'file_id\']}/download",' in overlay
     assert '+                                metrics["file_cache_hit"] += 1' in overlay
