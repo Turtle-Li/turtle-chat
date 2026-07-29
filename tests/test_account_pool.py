@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest.mock import patch
 
 import httpx
 
@@ -11,10 +12,29 @@ from chatgpt_web_gateway.account_pool import (
     AccountPoolRouter,
     AccountUnavailable,
     MemoryAccountStore,
+    PostgresAccountStore,
     _lane_rate_limit_cooldown_seconds,
     _new_account,
     _now,
 )
+
+
+class PostgresAccountStorePoolingTests(unittest.TestCase):
+    @patch("psycopg_pool.ConnectionPool")
+    def test_uses_a_bounded_reusable_connection_pool(self, pool_class) -> None:
+        pooled_connection = object()
+        pool = pool_class.return_value
+        pool.connection.return_value = pooled_connection
+
+        store = PostgresAccountStore("postgresql://db.example/turtle")
+
+        self.assertIs(store._connect(), pooled_connection)
+        self.assertEqual(pool_class.call_args.kwargs["min_size"], 2)
+        self.assertEqual(pool_class.call_args.kwargs["max_size"], 24)
+        self.assertEqual(pool_class.call_args.kwargs["timeout"], 5.0)
+        self.assertTrue(pool_class.call_args.kwargs["open"])
+        store.close()
+        pool.close.assert_called_once_with(timeout=5.0)
 
 
 class AccountQuotaProfileTests(unittest.TestCase):

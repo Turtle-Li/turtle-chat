@@ -50,6 +50,7 @@ class PostgresAccountStoreTests(unittest.TestCase):
         import psycopg
         from psycopg import sql
 
+        self.store.close()
         with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as connection:
             connection.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(self.schema))

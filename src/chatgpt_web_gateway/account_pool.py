@@ -1515,15 +1515,37 @@ class PostgresAccountStore:
     """PostgreSQL implementation used by the production Gateway."""
 
     def __init__(self, database_url: str):
+        try:
+            from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
+        except ImportError as exc:  # pragma: no cover - dependency gate
+            raise RuntimeError(
+                "psycopg and psycopg_pool are required for the account pool"
+            ) from exc
+
         self.database_url = database_url
+        # Account admission performs several very short transactions per chat.
+        # Opening a fresh PostgreSQL connection for each one added tens to
+        # hundreds of milliseconds before every upstream request. Keep a
+        # bounded pool aligned with the published GPT concurrency ceiling.
+        self._connection_pool = ConnectionPool(
+            conninfo=self.database_url,
+            kwargs={"row_factory": dict_row},
+            min_size=2,
+            max_size=24,
+            timeout=5.0,
+            max_idle=300.0,
+            max_lifetime=1800.0,
+            check=ConnectionPool.check_connection,
+            name="turtle-account-store",
+            open=True,
+        )
 
     def _connect(self):
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except ImportError as exc:  # pragma: no cover - production dependency gate
-            raise RuntimeError("psycopg is required for the account pool") from exc
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+        return self._connection_pool.connection()
+
+    def close(self) -> None:
+        self._connection_pool.close(timeout=5.0)
 
     def initialize(
         self,
@@ -2882,6 +2904,9 @@ class AccountPoolRouter:
         clients = [value[2] for value in self._clients.values()]
         self._clients.clear()
         await asyncio.gather(*(client.close() for client in clients), return_exceptions=True)
+        close_store = getattr(self.store, "close", None)
+        if callable(close_store):
+            await asyncio.to_thread(close_store)
 
     async def client_for(self, account: UpstreamAccount) -> UpstreamClient:
         async with self._client_lock:
