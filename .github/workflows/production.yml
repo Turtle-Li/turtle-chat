@@ -61,6 +61,7 @@ jobs:
           OPEN_WEBUI_GREEN_IMAGE: syntax-only
         run: |
           bash -n deploy/turtle-gpt/remote/deploy-release
+          bash -n deploy/turtle-gpt/remote/pull-public-release
           bash -n deploy/turtle-gpt/remote/stop-inactive-slot
           bash -n deploy/turtle-gpt/remote/turtle-gpt-deploy-entry
           docker compose -f deploy/turtle-gpt/compose.blue-green.yml config --quiet

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly REPOSITORY_URL=https://github.com/Turtle-Li/turtle-chat.git
+readonly MAIN_REF=refs/heads/main
+readonly PUBLIC_GATEWAY_IMAGE=ghcr.io/turtle-li/turtle-chat-gateway
+readonly PUBLIC_WEBUI_IMAGE=ghcr.io/turtle-li/turtle-chat-open-webui
+readonly DEPLOY_COMMAND=/opt/turtle-gpt/deploy/bin/deploy-release
+readonly STATE_DIR=/opt/turtle-gpt/deploy/state
+readonly WORK_ROOT=/opt/turtle-gpt/deploy
+readonly POLL_LOCK=/run/lock/turtle-gpt-public-release-poll.lock
+
+log() {
+  printf '[turtle-public-release] %s\n' "$*"
+}
+
+fail() {
+  log "ERROR: $*" >&2
+  exit 1
+}
+
+[[ $EUID -eq 0 ]] || fail "public release polling must run as root"
+[[ -x $DEPLOY_COMMAND ]] || fail "deployment command is unavailable"
+
+exec 8>"$POLL_LOCK"
+if ! flock -n 8; then
+  log "another public release poll is still active"
+  exit 0
+fi
+
+requested_sha=${1:-}
+if [[ -n $requested_sha ]]; then
+  SHA=$requested_sha
+else
+  remote_ref=$(git ls-remote --refs "$REPOSITORY_URL" "$MAIN_REF")
+  SHA=${remote_ref%%[[:space:]]*}
+  [[ $remote_ref == *$'\t'"$MAIN_REF" ]] || fail "public main ref is unavailable"
+fi
+readonly SHA
+readonly SHORT_SHA=${SHA:0:12}
+[[ $SHA =~ ^[0-9a-f]{40}$ ]] || fail "invalid public release commit"
+
+if [[ -f "$STATE_DIR/active-release" ]] && [[ $(<"$STATE_DIR/active-release") == "$SHA" ]]; then
+  log "release $SHORT_SHA is already active"
+  exit 0
+fi
+
+gateway_ref="$PUBLIC_GATEWAY_IMAGE:git-$SHA"
+webui_ref="$PUBLIC_WEBUI_IMAGE:git-$SHA"
+if ! docker manifest inspect "$gateway_ref" >/dev/null 2>&1 ||
+   ! docker manifest inspect "$webui_ref" >/dev/null 2>&1; then
+  log "release $SHORT_SHA images are not both published yet"
+  exit 0
+fi
+
+workspace=$(mktemp -d "$WORK_ROOT/public-release.XXXXXX")
+cleanup() {
+  rm -rf -- "$workspace"
+}
+trap cleanup EXIT
+
+repository_dir="$workspace/repository"
+bundle_dir="$workspace/bundle"
+git init --quiet "$repository_dir"
+git -C "$repository_dir" \
+  -c protocol.version=2 \
+  fetch --quiet --depth=1 --no-tags "$REPOSITORY_URL" "$SHA"
+[[ $(git -C "$repository_dir" rev-parse FETCH_HEAD) == "$SHA" ]] ||
+  fail "fetched public commit does not match requested release"
+
+mkdir -p "$bundle_dir"
+git -C "$repository_dir" archive \
+  --format=tar.gz \
+  --output="$bundle_dir/source.tar.gz" \
+  "$SHA"
+printf '%s\n' "$SHA" >"$bundle_dir/commit"
+printf 'ghcr-public-v1\n' >"$bundle_dir/registry-release"
+(
+  cd "$bundle_dir"
+  sha256sum registry-release source.tar.gz >manifest.sha256
+  sha256sum --check --status manifest.sha256
+)
+
+log "deploying published release $SHORT_SHA"
+tar -C "$bundle_dir" \
+  -cf - commit manifest.sha256 registry-release source.tar.gz |
+  "$DEPLOY_COMMAND" "$SHA"

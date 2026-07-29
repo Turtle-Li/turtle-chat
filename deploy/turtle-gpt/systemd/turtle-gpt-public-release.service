@@ -1,0 +1,15 @@
+[Unit]
+Description=Pull and deploy the latest built Turtle public release
+Wants=network-online.target
+After=network-online.target docker.service
+ConditionPathExists=/opt/turtle-gpt/deploy/bin/pull-public-release
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+ExecStart=/opt/turtle-gpt/deploy/bin/pull-public-release

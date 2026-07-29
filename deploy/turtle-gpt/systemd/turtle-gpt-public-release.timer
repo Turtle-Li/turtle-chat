@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for a newly built Turtle public release
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+RandomizedDelaySec=20s
+Persistent=true
+Unit=turtle-gpt-public-release.service
+
+[Install]
+WantedBy=timers.target

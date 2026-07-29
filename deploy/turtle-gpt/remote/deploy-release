@@ -12,6 +12,8 @@ readonly ROUTER_TEMPLATE="$DEPLOY_ROOT/router.conf.template"
 readonly PROJECT_NAME=turtle-gpt-deploy
 readonly LOCK_FILE=/run/lock/turtle-gpt-production-deploy.lock
 readonly DRAIN_SECONDS=1200
+readonly PUBLIC_GATEWAY_IMAGE=ghcr.io/turtle-li/turtle-chat-gateway
+readonly PUBLIC_WEBUI_IMAGE=ghcr.io/turtle-li/turtle-chat-open-webui
 readonly SHA=${1:-}
 readonly SHORT_SHA=${SHA:0:12}
 
@@ -45,26 +47,40 @@ tar --extract --file - --directory "$bundle_dir" --no-same-owner --no-same-permi
 actual_files=$(find "$bundle_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)
 source_files=$'commit\nmanifest.sha256\nsource.tar.gz'
 legacy_files=$'commit\nimages.tar.zst\nmanifest.sha256\nsource.tar.gz'
+registry_files=$'commit\nmanifest.sha256\nregistry-release\nsource.tar.gz'
 if [[ $actual_files == "$source_files" ]]; then
   bundle_mode=source
 elif [[ $actual_files == "$legacy_files" ]]; then
   bundle_mode=prebuilt
+elif [[ $actual_files == "$registry_files" ]]; then
+  bundle_mode=registry
 else
   fail "release bundle contains unexpected files"
 fi
 [[ $(<"$bundle_dir/commit") == "$SHA" ]] || fail "release commit does not match requested commit"
 
-if [[ $bundle_mode == source ]]; then
-  if [[ $(wc -l <"$bundle_dir/manifest.sha256") -ne 1 ]] ||
-     grep -Evq '^[0-9a-f]{64}  source\.tar\.gz$' "$bundle_dir/manifest.sha256"; then
-    fail "source release manifest is invalid"
-  fi
-else
-  if [[ $(wc -l <"$bundle_dir/manifest.sha256") -ne 2 ]] ||
-     grep -Evq '^[0-9a-f]{64}  (images\.tar\.zst|source\.tar\.gz)$' "$bundle_dir/manifest.sha256"; then
-    fail "prebuilt release manifest is invalid"
-  fi
-fi
+case "$bundle_mode" in
+  source)
+    if [[ $(wc -l <"$bundle_dir/manifest.sha256") -ne 1 ]] ||
+       grep -Evq '^[0-9a-f]{64}  source\.tar\.gz$' "$bundle_dir/manifest.sha256"; then
+      fail "source release manifest is invalid"
+    fi
+    ;;
+  prebuilt)
+    if [[ $(wc -l <"$bundle_dir/manifest.sha256") -ne 2 ]] ||
+       grep -Evq '^[0-9a-f]{64}  (images\.tar\.zst|source\.tar\.gz)$' "$bundle_dir/manifest.sha256"; then
+      fail "prebuilt release manifest is invalid"
+    fi
+    ;;
+  registry)
+    if [[ $(wc -l <"$bundle_dir/manifest.sha256") -ne 2 ]] ||
+       grep -Evq '^[0-9a-f]{64}  (registry-release|source\.tar\.gz)$' "$bundle_dir/manifest.sha256"; then
+      fail "registry release manifest is invalid"
+    fi
+    [[ $(<"$bundle_dir/registry-release") == ghcr-public-v1 ]] ||
+      fail "registry release marker is invalid"
+    ;;
+esac
 (
   cd "$bundle_dir"
   sha256sum --check --status manifest.sha256
@@ -106,12 +122,24 @@ if [[ $bundle_mode == source ]]; then
     --label "org.opencontainers.image.revision=$SHA" \
     --tag "$webui_image" \
     "$release_dir/branding/open-webui"
-else
+elif [[ $bundle_mode == prebuilt ]]; then
   log "loading legacy prebuilt application images"
   zstd --decompress --stdout "$bundle_dir/images.tar.zst" | docker load >/dev/null
+else
+  public_gateway_ref="$PUBLIC_GATEWAY_IMAGE:git-$SHA"
+  public_webui_ref="$PUBLIC_WEBUI_IMAGE:git-$SHA"
+  log "pulling commit-addressed application images"
+  docker pull "$public_gateway_ref"
+  docker pull "$public_webui_ref"
+  docker tag "$public_gateway_ref" "$gateway_image"
+  docker tag "$public_webui_ref" "$webui_image"
 fi
 docker image inspect "$gateway_image" "$webui_image" >/dev/null
-if [[ $bundle_mode == source ]]; then
+if [[ $bundle_mode != prebuilt ]]; then
+  [[ $(docker image inspect --format '{{.Architecture}}' "$gateway_image") == amd64 ]] ||
+    fail "Gateway image architecture mismatch"
+  [[ $(docker image inspect --format '{{.Architecture}}' "$webui_image") == amd64 ]] ||
+    fail "Open WebUI image architecture mismatch"
   [[ $(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$gateway_image") == "$SHA" ]] ||
     fail "Gateway image revision label mismatch"
   [[ $(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$webui_image") == "$SHA" ]] ||
