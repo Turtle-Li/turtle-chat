@@ -41,6 +41,7 @@ COPY assets/provider-claude.svg /app/build/static/turtle-provider-claude.svg
 COPY assets/favicon.png /app/build/favicon.png
 
 RUN python /tmp/patch_open_webui.py \
+    && python -m compileall -q /app/backend/open_webui \
     && rm /tmp/patch_open_webui.py /tmp/turtle-client-read-cache.js
 
 LABEL org.opencontainers.image.title="Turtle's Chat Open WebUI"

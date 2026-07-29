@@ -48,6 +48,9 @@ def test_exact_chat_reads_are_rerouted_to_the_paged_history_api():
     assert "Path(\"/app/build/_app/immutable\").rglob(\"*.js\")" in patcher
     assert "sync_chat_history_index" in patcher
 
+    dockerfile = (BRANDING / "Dockerfile").read_text(encoding="utf-8")
+    assert "python -m compileall -q /app/backend/open_webui" in dockerfile
+
 
 def test_main_files_and_static_thumbnails_have_distinct_cdn_prefixes():
     core = (BRANDING / "turtle_storage" / "core.py").read_text(encoding="utf-8")

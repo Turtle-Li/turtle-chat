@@ -2419,7 +2419,7 @@ replace_once(
                                 {'done': True},
                             )
 
-    selected_chat_models = user_message.get('models') if isinstance(user_message, dict) else None
+                    selected_chat_models = user_message.get('models') if isinstance(user_message, dict) else None
 """,
 )
 
