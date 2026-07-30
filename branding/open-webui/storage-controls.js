@@ -21,12 +21,19 @@
   };
   const IMAGE_PREPARE_CONCURRENCY = 2;
   const DIRECT_UPLOAD_TRANSFER_CONCURRENCY = 3;
+  const DIRECT_UPLOAD_RETRY_DELAYS_MS = [0, 350, 1_000];
+  const DEFERRED_UPLOAD_MAX_AGE_MS = 30 * 60 * 1_000;
   const previewObjectUrls = new Set();
+  const deferredUploadObjectUrls = new Set();
   const mediaUrlCache = new Map();
+  const deferredComposerUploads = new Map();
   let capturedAuthorization = "";
   let capabilityCache = null;
   let capabilityCachedAt = 0;
   let capabilityRequest = null;
+  let deferredUploadSequence = 0;
+  let deferredUploadPreviewQueued = false;
+  let deferredUploadFlush = null;
   let lastFocusedElement = null;
   let launcherResizeObserver = null;
   let launcherObservedSidebar = null;
@@ -94,6 +101,53 @@
 
   const runImagePreparation = createTaskLimiter(IMAGE_PREPARE_CONCURRENCY);
   const runDirectUploadTransfer = createTaskLimiter(DIRECT_UPLOAD_TRANSFER_CONCURRENCY);
+
+  const abortError = () => new DOMException("Upload cancelled", "AbortError");
+
+  const abortableDelay = (delay, signal) =>
+    new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(abortError());
+        return;
+      }
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        reject(abortError());
+      };
+      const timer = window.setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, delay);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+
+  const retryableUploadStatus = (status) =>
+    [408, 425, 429].includes(Number(status)) || Number(status) >= 500;
+
+  const uploadBodyWithRetry = async (url, init, signal) => {
+    let lastError = null;
+    for (let attempt = 0; attempt < DIRECT_UPLOAD_RETRY_DELAYS_MS.length; attempt += 1) {
+      if (DIRECT_UPLOAD_RETRY_DELAYS_MS[attempt] > 0) {
+        await abortableDelay(DIRECT_UPLOAD_RETRY_DELAYS_MS[attempt], signal);
+      }
+      try {
+        const response = await originalFetch(url, { ...init, signal });
+        if (
+          response.ok
+          || !retryableUploadStatus(response.status)
+          || attempt === DIRECT_UPLOAD_RETRY_DELAYS_MS.length - 1
+        ) {
+          return response;
+        }
+        lastError = new Error(`COS 上传暂时失败（HTTP ${response.status}）`);
+      } catch (error) {
+        if (signal?.aborted || error?.name === "AbortError") throw abortError();
+        lastError = error;
+        if (attempt === DIRECT_UPLOAD_RETRY_DELAYS_MS.length - 1) throw error;
+      }
+    }
+    throw lastError || new Error("COS 上传失败");
+  };
 
   const pathOf = (input) => {
     try {
@@ -420,6 +474,12 @@
       headers: { "Content-Type": "application/json" },
     });
 
+  const cancelledUploadResponse = () =>
+    new Response("null", {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+
   const sendOriginalUpload = (input, init, body) => {
     const headers = headersFrom(input, init);
     headers.delete("Content-Type");
@@ -437,7 +497,7 @@
     }
   };
 
-  const directUpload = async (file, form, thumbnail = null) => {
+  const directUpload = async (file, form, thumbnail = null, options = {}) => {
     const presign = await apiFetch("/uploads/presign", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -458,34 +518,44 @@
             }
           : null,
       }),
+      signal: options.signal,
     });
     if (!presign.ok) throw new Error(await errorMessage(presign, "无法准备对象存储上传"));
     const ticket = await presign.json();
+    options.onReservation?.(ticket.file_id);
     try {
       if (thumbnail && !ticket.thumbnail_upload?.upload_url) {
         throw new Error("静态缩略图上传地址缺失");
       }
       const uploads = [
         runDirectUploadTransfer(() =>
-          originalFetch(ticket.upload_url, {
-            method: "PUT",
-            headers: ticket.headers || { "Content-Type": file.type },
-            body: file,
-            credentials: "omit",
-            mode: "cors",
-          }),
+          uploadBodyWithRetry(
+            ticket.upload_url,
+            {
+              method: "PUT",
+              headers: ticket.headers || { "Content-Type": file.type },
+              body: file,
+              credentials: "omit",
+              mode: "cors",
+            },
+            options.signal,
+          ),
         ),
       ];
       if (thumbnail && ticket.thumbnail_upload) {
         uploads.push(
           runDirectUploadTransfer(() =>
-            originalFetch(ticket.thumbnail_upload.upload_url, {
-              method: "PUT",
-              headers: ticket.thumbnail_upload.headers || { "Content-Type": STATIC_THUMBNAIL.content_type },
-              body: thumbnail.blob,
-              credentials: "omit",
-              mode: "cors",
-            }),
+            uploadBodyWithRetry(
+              ticket.thumbnail_upload.upload_url,
+              {
+                method: "PUT",
+                headers: ticket.thumbnail_upload.headers || { "Content-Type": STATIC_THUMBNAIL.content_type },
+                body: thumbnail.blob,
+                credentials: "omit",
+                mode: "cors",
+              },
+              options.signal,
+            ),
           ),
         );
       }
@@ -499,14 +569,429 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file_id: ticket.file_id }),
+        signal: options.signal,
       });
       if (!complete.ok) throw new Error(await errorMessage(complete, "COS 文件校验失败"));
+      options.onComplete?.(ticket.file_id);
       invalidateSpaceData();
       return complete;
     } catch (error) {
       await cancelReservation(ticket.file_id);
       throw error;
     }
+  };
+
+  const composerForDeferredUpload = () =>
+    document.querySelector("#message-input-container");
+
+  const decodedFilename = (value) => {
+    try {
+      return decodeURIComponent(String(value || ""));
+    } catch (_error) {
+      return String(value || "");
+    }
+  };
+
+  const deferredUploadWrapper = (removeButton) => {
+    let node = removeButton?.parentElement;
+    while (node && node.id !== "message-input-container") {
+      if (node.classList?.contains("group") && node.classList?.contains("relative")) return node;
+      node = node.parentElement;
+    }
+    return null;
+  };
+
+  const releaseDeferredUploadPreview = (task) => {
+    if (task.previewUrl) {
+      URL.revokeObjectURL(task.previewUrl);
+      deferredUploadObjectUrls.delete(task.previewUrl);
+      task.previewUrl = "";
+    }
+    const wrapper = task.wrapper;
+    if (!wrapper) return;
+    wrapper.querySelector("[data-turtle-deferred-upload-preview]")?.remove();
+    wrapper.querySelector("[data-turtle-deferred-upload-badge]")?.remove();
+    wrapper.classList.remove("turtle-deferred-upload-card", "turtle-deferred-upload-has-preview");
+    delete wrapper.dataset.turtleDeferredUploadId;
+    delete wrapper.dataset.turtleDeferredUploadState;
+    wrapper.removeAttribute("data-turtle-deferred-upload");
+    if (wrapper.title === "已在浏览器中准备，发送消息时上传") wrapper.removeAttribute("title");
+    task.wrapper = null;
+  };
+
+  const renderDeferredUploadPreview = (task) => {
+    const wrapper = task.wrapper;
+    if (!wrapper?.isConnected) return;
+    wrapper.classList.add("turtle-deferred-upload-card");
+    wrapper.dataset.turtleDeferredUploadId = task.id;
+    wrapper.dataset.turtleDeferredUploadState = task.state;
+    wrapper.setAttribute("data-turtle-deferred-upload", "");
+    wrapper.title = "已在浏览器中准备，发送消息时上传";
+
+    let badge = wrapper.querySelector("[data-turtle-deferred-upload-badge]");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.dataset.turtleDeferredUploadBadge = "";
+      badge.setAttribute("aria-live", "polite");
+      wrapper.append(badge);
+    }
+    badge.textContent = {
+      preparing: "压缩中",
+      prepared: "待发送",
+      uploading: "上传中",
+      settling: "确认中",
+      failed: "上传失败",
+    }[task.state] || "";
+
+    if (
+      task.state === "prepared"
+      && !task.previewUrl
+      && task.prepared?.file?.type?.startsWith("image/")
+    ) {
+      const source = task.prepared.thumbnail?.blob || task.prepared.file;
+      task.previewUrl = URL.createObjectURL(source);
+      deferredUploadObjectUrls.add(task.previewUrl);
+    }
+    if (task.previewUrl && !wrapper.querySelector("[data-turtle-deferred-upload-preview]")) {
+      const preview = document.createElement("img");
+      preview.dataset.turtleDeferredUploadPreview = "";
+      preview.src = task.previewUrl;
+      preview.alt = "";
+      preview.setAttribute("aria-hidden", "true");
+      wrapper.prepend(preview);
+      wrapper.classList.add("turtle-deferred-upload-has-preview");
+    }
+  };
+
+  const scanDeferredUploadPreviews = () => {
+    deferredUploadPreviewQueued = false;
+    const composer = document.querySelector("#message-input-container");
+    if (!composer) return;
+    const wrappers = Array.from(
+      composer.querySelectorAll(
+        'button[aria-label="Remove File"], button[aria-label="Remove file"], '
+          + 'button[aria-label="移除文件"], button[aria-label="删除文件"]',
+      ),
+      deferredUploadWrapper,
+    ).filter(Boolean);
+    const available = wrappers.filter((wrapper) => !wrapper.dataset.turtleDeferredUploadId);
+
+    for (const task of deferredComposerUploads.values()) {
+      if (task.cancelled || ["completed", "failed"].includes(task.state)) continue;
+      if (task.wrapper?.isConnected) {
+        renderDeferredUploadPreview(task);
+        continue;
+      }
+      if (task.state === "settling") {
+        if (nativeDeferredAttachmentReady(task)) {
+          task.state = "completed";
+          deferredComposerUploads.delete(task.id);
+          releaseDeferredUploadPreview(task);
+        }
+        continue;
+      }
+      task.wrapper = null;
+      const displayName = decodedFilename(task.displayName);
+      const index = available.findIndex((wrapper) =>
+        String(wrapper.textContent || "").includes(displayName),
+      );
+      if (index < 0) continue;
+      task.wrapper = available.splice(index, 1)[0];
+      task.wrapperAssigned = true;
+      renderDeferredUploadPreview(task);
+    }
+  };
+
+  const queueDeferredUploadPreviewScan = () => {
+    if (deferredUploadPreviewQueued) return;
+    deferredUploadPreviewQueued = true;
+    requestAnimationFrame(scanDeferredUploadPreviews);
+  };
+
+  const nativeDeferredAttachmentReady = (task) => {
+    if (!task.fileId) return false;
+    return Array.from(
+      document.querySelectorAll("#message-input-container img[src]"),
+    ).some((image) => String(image.currentSrc || image.src || "").includes(task.fileId));
+  };
+
+  const deleteCompletedDeferredUpload = async (fileId) => {
+    if (!fileId) return;
+    try {
+      await originalFetch(`/api/v1/files/${encodeURIComponent(fileId)}`, {
+        method: "DELETE",
+        headers: authHeaders(),
+        credentials: "same-origin",
+      });
+      invalidateSpaceData();
+    } catch (_error) {
+      // Completed-but-unsent objects remain visible in My Space if cleanup
+      // itself is temporarily unavailable.
+    }
+  };
+
+  const cancelDeferredUpload = (task) => {
+    if (!task || task.cancelled || ["completed", "failed"].includes(task.state)) return;
+    const completedFileId = task.state === "settling" ? task.fileId : "";
+    task.cancelled = true;
+    task.state = "cancelled";
+    task.abortController.abort();
+    task.release();
+    releaseDeferredUploadPreview(task);
+    if (completedFileId) void deleteCompletedDeferredUpload(completedFileId);
+  };
+
+  const handleDeferredUploadRemoval = (event) => {
+    const removeButton = event.target?.closest?.(
+      'button[aria-label="Remove File"], button[aria-label="Remove file"], '
+        + 'button[aria-label="移除文件"], button[aria-label="删除文件"]',
+    );
+    const wrapper = deferredUploadWrapper(removeButton);
+    const task = deferredComposerUploads.get(wrapper?.dataset?.turtleDeferredUploadId || "");
+    if (task) cancelDeferredUpload(task);
+  };
+
+  const setDeferredUploadBusy = (busy, count = 0) => {
+    const composer = document.querySelector("#message-input-container");
+    const sendButton = document.querySelector("#send-message-button");
+    if (composer) {
+      composer.toggleAttribute("data-turtle-deferred-upload-busy", busy);
+      composer.setAttribute("aria-busy", String(busy));
+    }
+    let status = document.querySelector("#turtle-deferred-upload-status");
+    if (busy && composer) {
+      if (!status) {
+        status = document.createElement("div");
+        status.id = "turtle-deferred-upload-status";
+        status.setAttribute("role", "status");
+        status.setAttribute("aria-live", "polite");
+        composer.append(status);
+      }
+      status.textContent = `正在上传 ${count} 个附件…`;
+      if (sendButton) {
+        sendButton.dataset.turtleDeferredUploadBusy = "true";
+        sendButton.setAttribute("aria-busy", "true");
+      }
+      return;
+    }
+    status?.remove();
+    if (sendButton?.dataset.turtleDeferredUploadBusy === "true") {
+      delete sendButton.dataset.turtleDeferredUploadBusy;
+      sendButton.removeAttribute("aria-busy");
+    }
+  };
+
+  const settleNativeUploadState = async (tasks) => {
+    const deadline = Date.now() + 5_000;
+    do {
+      await Promise.resolve();
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      await Promise.resolve();
+      let pending = false;
+      for (const task of tasks) {
+        if (task.state !== "settling") continue;
+        if (nativeDeferredAttachmentReady(task)) {
+          task.state = "completed";
+          deferredComposerUploads.delete(task.id);
+          releaseDeferredUploadPreview(task);
+        } else {
+          pending = true;
+        }
+      }
+      if (!pending) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 32));
+    } while (Date.now() < deadline);
+    for (const task of tasks) {
+      if (task.state !== "settling") continue;
+      task.state = "failed";
+      deferredComposerUploads.delete(task.id);
+      releaseDeferredUploadPreview(task);
+      void deleteCompletedDeferredUpload(task.fileId);
+    }
+    return false;
+  };
+
+  const flushDeferredComposerUploads = async () => {
+    if (deferredUploadFlush) {
+      await deferredUploadFlush;
+      return false;
+    }
+    const now = Date.now();
+    for (const task of deferredComposerUploads.values()) {
+      if (!task.cancelled && now - task.createdAt > DEFERRED_UPLOAD_MAX_AGE_MS) {
+        cancelDeferredUpload(task);
+      }
+    }
+    const tasks = Array.from(deferredComposerUploads.values()).filter(
+      (task) =>
+        !task.cancelled
+        && !["completed", "failed"].includes(task.state),
+    );
+    if (!tasks.length) return true;
+
+    deferredUploadFlush = (async () => {
+      setDeferredUploadBusy(true, tasks.length);
+      tasks.forEach((task) => task.release());
+      const results = await Promise.allSettled(tasks.map((task) => task.done));
+      const nativeSettled = await settleNativeUploadState(tasks);
+      const failed = results.some((result) => result.status === "rejected")
+        || tasks.some((task) => task.state === "failed")
+        || !nativeSettled;
+      if (failed) {
+        const copy = nativeSettled
+          ? "附件上传失败，消息尚未发送，请重新选择失败的附件后再试"
+          : "附件已上传，正在等待页面确认，请稍后再次发送";
+        toast(copy, "error");
+        return false;
+      }
+      return true;
+    })();
+    try {
+      return await deferredUploadFlush;
+    } finally {
+      setDeferredUploadBusy(false);
+      deferredUploadFlush = null;
+    }
+  };
+
+  const hasDeferredComposerUploads = () =>
+    Array.from(deferredComposerUploads.values()).some(
+      (task) =>
+        !task.cancelled
+        && !["completed", "failed"].includes(task.state),
+    );
+
+  const submitComposerAfterDeferredUploads = async (form) => {
+    if (!await flushDeferredComposerUploads()) return;
+    const sendButton = form.querySelector("#send-message-button")
+      || document.querySelector("#send-message-button");
+    form.requestSubmit(sendButton instanceof HTMLButtonElement ? sendButton : undefined);
+  };
+
+  const handleDeferredUploadSubmit = (event) => {
+    const form = event.target;
+    if (
+      !(form instanceof HTMLFormElement)
+      || !form.querySelector("#message-input-container")
+      || !hasDeferredComposerUploads()
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void submitComposerAfterDeferredUploads(form);
+  };
+
+  const ctrlEnterToSend = () => {
+    try {
+      const settings = JSON.parse(localStorage.getItem("settings") || "{}");
+      return settings?.ctrlEnterToSend === true;
+    } catch (_error) {
+      return false;
+    }
+  };
+
+  const handleDeferredUploadKeydown = (event) => {
+    if (
+      event.key !== "Enter"
+      || event.shiftKey
+      || event.isComposing
+      || event.keyCode === 229
+      || !event.target?.closest?.("#chat-input")
+      || !hasDeferredComposerUploads()
+    ) {
+      return;
+    }
+    const modifierPressed = event.ctrlKey || event.metaKey;
+    if (ctrlEnterToSend() ? !modifierPressed : modifierPressed) return;
+    const form = document.querySelector("#message-input-container")?.closest("form");
+    if (!form) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void submitComposerAfterDeferredUploads(form);
+  };
+
+  const stageDeferredComposerUpload = ({
+    originalFile,
+    form,
+    preparation,
+    requestSignal,
+  }) => {
+    deferredUploadSequence += 1;
+    let releaseGate;
+    const task = {
+      id: `turtle-upload-${Date.now().toString(36)}-${deferredUploadSequence.toString(36)}`,
+      displayName: originalFile.name,
+      createdAt: Date.now(),
+      state: "preparing",
+      prepared: null,
+      previewUrl: "",
+      wrapper: null,
+      wrapperAssigned: false,
+      cancelled: false,
+      released: false,
+      fileId: "",
+      abortController: new AbortController(),
+      release: () => {},
+      done: null,
+    };
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    task.release = () => {
+      if (task.released) return;
+      task.released = true;
+      releaseGate();
+    };
+    if (requestSignal) {
+      if (requestSignal.aborted) cancelDeferredUpload(task);
+      else requestSignal.addEventListener("abort", () => cancelDeferredUpload(task), { once: true });
+    }
+
+    deferredComposerUploads.set(task.id, task);
+    queueDeferredUploadPreviewScan();
+    task.done = (async () => {
+      try {
+        task.prepared = await preparation;
+        if (task.cancelled) return cancelledUploadResponse();
+        task.state = "prepared";
+        queueDeferredUploadPreviewScan();
+        await gate;
+        if (task.cancelled) return cancelledUploadResponse();
+
+        task.state = "uploading";
+        queueDeferredUploadPreviewScan();
+        const file = task.prepared.file;
+        const compressedForm = replaceFormFile(form, file, file !== originalFile);
+        const response = await directUpload(file, compressedForm, task.prepared.thumbnail, {
+          signal: task.abortController.signal,
+          onReservation: (fileId) => {
+            task.fileId = fileId;
+          },
+        });
+        if (task.cancelled) return cancelledUploadResponse();
+        task.state = "settling";
+        queueDeferredUploadPreviewScan();
+        return response;
+      } catch (error) {
+        if (task.cancelled || error?.name === "AbortError") {
+          task.state = "cancelled";
+          return cancelledUploadResponse();
+        }
+        task.state = "failed";
+        return jsonResponseError(error?.message || "媒体上传失败，请稍后重试", 503);
+      } finally {
+        queueDeferredUploadPreviewScan();
+        if (task.state !== "settling") {
+          window.setTimeout(() => {
+            if (deferredComposerUploads.get(task.id) !== task) return;
+            deferredComposerUploads.delete(task.id);
+            releaseDeferredUploadPreview(task);
+          }, 0);
+        }
+      }
+    })();
+    return task.done;
   };
 
   window.fetch = async (input, init) => {
@@ -533,25 +1018,41 @@
         }
         return originalFetch(input, init);
       }
-      const prepared = originalFile.type.startsWith("image/")
-        ? await runImagePreparation(() =>
+      const preparation = originalFile.type.startsWith("image/")
+        ? runImagePreparation(() =>
             prepareImageAssets(originalFile, storageCapability.media),
           )
-        : { file: originalFile, thumbnail: null };
-      const file = prepared.file;
-      const compressedForm = replaceFormFile(form, file, file !== originalFile);
+        : Promise.resolve({ file: originalFile, thumbnail: null });
+      const prepared = async () => preparation;
       const requestUrl = typeof input === "string" ? input : input.url;
       const needsServerProcessing = new URL(requestUrl, window.location.origin).searchParams.get("process") === "true";
       if (!storageCapability.direct_upload) {
+        const resolved = await prepared();
+        const compressedForm = replaceFormFile(form, resolved.file, resolved.file !== originalFile);
         if (storageCapability.strict_external_media) {
           throw new Error("对象存储直传不可用，已阻止素材经过主服务器");
         }
         return sendOriginalUpload(input, init, compressedForm);
       }
       if (needsServerProcessing && !storageCapability.strict_external_media) {
+        const resolved = await prepared();
+        const compressedForm = replaceFormFile(form, resolved.file, resolved.file !== originalFile);
         return sendOriginalUpload(input, init, compressedForm);
       }
-      return await directUpload(file, compressedForm, prepared.thumbnail);
+      const composer = composerForDeferredUpload();
+      if (composer) {
+        const requestSignal = init?.signal
+          || (typeof Request !== "undefined" && input instanceof Request ? input.signal : null);
+        return await stageDeferredComposerUpload({
+          originalFile,
+          form,
+          preparation,
+          requestSignal,
+        });
+      }
+      const resolved = await prepared();
+      const compressedForm = replaceFormFile(form, resolved.file, resolved.file !== originalFile);
+      return await directUpload(resolved.file, compressedForm, resolved.thumbnail);
     } catch (error) {
       return jsonResponseError(error?.message || "媒体上传失败，请稍后重试");
     }
@@ -3938,13 +4439,18 @@
 
   const start = () => {
     document.documentElement.dataset.turtleStorage = "ready";
+    window.turtleFlushDeferredUploads = flushDeferredComposerUploads;
     document.addEventListener("click", suppressRichReferenceNavigation, true);
     document.addEventListener("click", suppressUnsupportedSandboxNavigation, true);
     document.addEventListener("click", suppressManagedImageSourceNavigation, true);
     document.addEventListener("click", downloadManagedAttachmentOnPage, true);
+    document.addEventListener("click", handleDeferredUploadRemoval, true);
     document.addEventListener("click", dismissGeneratedGalleryDownloadMenus);
+    document.addEventListener("submit", handleDeferredUploadSubmit, true);
+    document.addEventListener("keydown", handleDeferredUploadKeydown, true);
     new MutationObserver(() => {
       queueMount();
+      queueDeferredUploadPreviewScan();
       scheduleManagedThumbnailScan();
       decorateManagedOutputs();
       enhanceNativeImagePreviews();
@@ -3953,6 +4459,7 @@
     }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["src"] });
     window.addEventListener("pageshow", () => {
       queueMount();
+      queueDeferredUploadPreviewScan();
       scheduleManagedThumbnailScan();
       decorateManagedOutputs();
       enhanceNativeImagePreviews();
@@ -3961,6 +4468,7 @@
     });
     window.addEventListener("popstate", () => {
       queueMount();
+      queueDeferredUploadPreviewScan();
       scheduleManagedThumbnailScan();
       decorateManagedOutputs();
       compactSearchSources();
@@ -3968,12 +4476,19 @@
     });
     window.addEventListener("focus", () => {
       queueMount();
+      queueDeferredUploadPreviewScan();
       scheduleManagedThumbnailScan();
       decorateManagedOutputs();
       compactSearchSources();
       syncNativeReasoningDisclosure();
     });
+    window.addEventListener("pagehide", () => {
+      deferredComposerUploads.forEach(cancelDeferredUpload);
+      deferredUploadObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+      deferredUploadObjectUrls.clear();
+    });
     queueMount();
+    queueDeferredUploadPreviewScan();
     scheduleManagedThumbnailScan();
     decorateManagedOutputs();
     enhanceNativeImagePreviews();
