@@ -2968,7 +2968,8 @@ index 36d75ec..78c9a85 100644
 +            if seen_assets:
 +                return
 +            if failed:
-                 return
+-                return
++                raise RuntimeError("ChatGPT image generation failed")
              await asyncio.sleep(poll_interval)
  
 +    @staticmethod
@@ -3492,7 +3493,7 @@ index 36d75ec..78c9a85 100644
                      elif m.get("p") == "/message/metadata/finished_text":
                          fields.is_thinking = False
                          if buffer:
-@@ -1011,26 +3774,77 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1011,26 +3774,93 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  if fields.conversation_id is None:
                      fields.conversation_id = v.get("conversation_id")
                      debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
@@ -3577,7 +3578,24 @@ index 36d75ec..78c9a85 100644
          if "error" in line and line.get("error"):
 +            if _payload_has_explicit_rate_limit(line):
 +                raise _explicit_rate_limit_exception(line)
-             raise RuntimeError(line.get("error"))
++            error = line.get("error")
++            error_message = (
++                error.get("message")
++                if isinstance(error, dict)
++                else error
++            )
++            if (
++                error_message == "Error in message stream"
++                and fields.task
++            ):
++                # ChatGPT can close the foreground message stream after it has
++                # accepted an asynchronous image-generation task.  The task is
++                # still authoritative and wait_media() below can retrieve its
++                # completed assets without replaying (and double-charging) the
++                # generation request.
++                return
+-            raise RuntimeError(line.get("error"))
++            raise RuntimeError(error)
  
      @classmethod
 @@ -1090,33 +3904,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):

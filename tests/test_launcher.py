@@ -241,6 +241,18 @@ def test_gpt4free_overlay_tracks_image_tasks_before_completion() -> None:
     assert "+            conversation.generated_images = None" in overlay
 
 
+def test_gpt4free_overlay_recovers_accepted_image_task_after_stream_error() -> None:
+    overlay = (
+        LAUNCHER_PATH.parents[1]
+        / "patches/gpt4free-openaiaccount-gpt56.patch"
+    ).read_text(encoding="utf-8")
+
+    assert '+                error_message == "Error in message stream"' in overlay
+    assert "+                and fields.task" in overlay
+    assert "+                return" in overlay
+    assert '+                raise RuntimeError("ChatGPT image generation failed")' in overlay
+
+
 def test_gpt4free_overlay_forwards_only_a_bounded_rate_limit_reset_hint() -> None:
     overlay = (
         LAUNCHER_PATH.parents[1]

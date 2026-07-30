@@ -60,26 +60,14 @@ STREAM_MEDIA_PLACEHOLDER = "图片已生成，正在整理并保存…"
 
 
 def requested_image_count(prompt: str) -> int:
-    """Return an explicit 2–4 image request; ordinary prompts stay at one."""
-    text = str(prompt or "")
-    chinese = re.search(
-        r"(?<!第)([2-4]|[两二三四])\s*(?:张|幅)"
-        r"(?:[^。！？!?\n]{0,16})?(?:图片|图像|图)",
-        text,
-    )
-    if chinese:
-        token = chinese.group(1)
-        names = {"两": 2, "二": 2, "三": 3, "四": 4}
-        return names[token] if token in names else int(token)
-    english = re.search(
-        r"\b(two|three|four|[2-4])\s+(?:[A-Za-z-]+\s+){0,3}images?\b",
-        text,
-        re.IGNORECASE,
-    )
-    if english:
-        token = english.group(1).lower()
-        names = {"two": 2, "three": 3, "four": 4}
-        return names[token] if token in names else int(token)
+    """Issue exactly one official image-generation operation per user send.
+
+    ChatGPT exposes image creation as a separate, dynamic allowance and does
+    not publish a stable conversion from one chat message to multiple image
+    outputs. Keep the production path one-to-one until Turtle has a separate
+    per-successful-image reservation and accounting lane.
+    """
+    del prompt
     return 1
 
 
@@ -169,18 +157,20 @@ def visible_stream_output(output: list) -> list:
 
 
 def carry_forward_message_images(messages: list[dict]) -> list[dict]:
-    """Attach branch images to the latest user turn for OpenaiAccount.
+    """Keep only images explicitly attached to the latest user turn.
 
-    The web provider currently consumes media only from the final user message.
-    Keep all text in its original turn, deduplicate image references, and move
-    only the structured ``image_url`` parts to that final user message.
+    OpenaiAccount keeps the upstream conversation sticky, so images from prior
+    turns are already part of that conversation and must not be uploaded again
+    on every follow-up.  The provider consumes media only from the final user
+    message; remove historical structured image parts, preserve every message's
+    text, and deduplicate only the images explicitly present on the latest turn.
     """
     copied = deepcopy(messages)
     user_messages = [message for message in copied if message.get("role") == "user"]
     if not user_messages:
         return copied
 
-    images: list[dict] = []
+    latest = user_messages[-1]
     seen: set[str] = set()
     for message in user_messages:
         content = message.get("content")
@@ -191,6 +181,8 @@ def carry_forward_message_images(messages: list[dict]) -> list[dict]:
             if not isinstance(item, dict) or item.get("type") != "image_url":
                 retained.append(item)
                 continue
+            if message is not latest:
+                continue
             image_url = item.get("image_url")
             value = image_url.get("url") if isinstance(image_url, dict) else image_url
             if not isinstance(value, str) or not value:
@@ -198,20 +190,8 @@ def carry_forward_message_images(messages: list[dict]) -> list[dict]:
                 continue
             if value not in seen:
                 seen.add(value)
-                images.append(item)
+                retained.append(item)
         message["content"] = retained
-
-    if not images:
-        return copied
-
-    latest = user_messages[-1]
-    content = latest.get("content")
-    if isinstance(content, list):
-        latest["content"] = [*content, *images]
-    elif isinstance(content, str):
-        latest["content"] = ([{"type": "text", "text": content}] if content else []) + images
-    else:
-        latest["content"] = images
     return copied
 
 

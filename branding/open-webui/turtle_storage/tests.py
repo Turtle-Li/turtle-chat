@@ -705,10 +705,10 @@ class ModelImageSourceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GeneratedMediaPatternTests(unittest.TestCase):
-    def test_explicit_multi_image_counts_are_bounded_and_localizable(self):
-        self.assertEqual(requested_image_count("请生成两张不同的图片"), 2)
-        self.assertEqual(requested_image_count("生成 4 幅海龟图像"), 4)
-        self.assertEqual(requested_image_count("Create three distinct images"), 3)
+    def test_each_send_issues_exactly_one_official_image_generation(self):
+        self.assertEqual(requested_image_count("请生成两张不同的图片"), 1)
+        self.assertEqual(requested_image_count("生成 4 幅海龟图像"), 1)
+        self.assertEqual(requested_image_count("Create three distinct images"), 1)
         self.assertEqual(requested_image_count("请修改第二张图"), 1)
         self.assertEqual(requested_image_count("请生成五张图片"), 1)
 
@@ -787,7 +787,7 @@ class GeneratedMediaPatternTests(unittest.TestCase):
 
         self.assertEqual(visible[0]["content"][0]["text"], STREAM_MEDIA_PLACEHOLDER)
 
-    def test_historical_images_are_deduplicated_and_moved_to_latest_user_turn(self):
+    def test_historical_images_are_removed_from_follow_up_request(self):
         first_image = {
             "type": "image_url",
             "image_url": {"url": "/api/v1/files/11111111-1111-1111-1111-111111111111/content"},
@@ -815,13 +815,42 @@ class GeneratedMediaPatternTests(unittest.TestCase):
         self.assertEqual(messages[0]["content"][-1], first_image)
         self.assertEqual(forwarded[0]["content"], [{"type": "text", "text": "先看这张图"}])
         self.assertEqual(forwarded[2]["content"], [{"type": "text", "text": "再看一张"}])
+        self.assertEqual(forwarded[-1]["content"], "请分析第一张图片")
+
+    def test_only_latest_turn_images_are_forwarded_and_deduplicated(self):
+        historical_image = {
+            "type": "image_url",
+            "image_url": {"url": "https://files.example/old.webp"},
+        }
+        latest_image = {
+            "type": "image_url",
+            "image_url": {"url": "https://files.example/current.webp"},
+        }
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "旧图"}, historical_image],
+            },
+            {"role": "assistant", "content": "继续"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "按这张继续"},
+                    latest_image,
+                    latest_image,
+                ],
+            },
+        ]
+
+        forwarded = carry_forward_message_images(messages)
+
+        self.assertEqual(
+            forwarded[0]["content"],
+            [{"type": "text", "text": "旧图"}],
+        )
         self.assertEqual(
             forwarded[-1]["content"],
-            [
-                {"type": "text", "text": "请分析第一张图片"},
-                first_image,
-                second_image,
-            ],
+            [{"type": "text", "text": "按这张继续"}, latest_image],
         )
 
     def test_first_turn_preview_url_is_bound_to_managed_file_id(self):

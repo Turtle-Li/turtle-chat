@@ -68,6 +68,23 @@ class ChatCompletionRequest(BaseModel):
             return value
         return {**value, "messages": filtered}
 
+    @model_validator(mode="after")
+    def validate_latest_user_image_count(self):
+        latest_user = next(
+            (message for message in reversed(self.messages) if message.role == "user"),
+            None,
+        )
+        if latest_user is None or not isinstance(latest_user.content, list):
+            return self
+        image_count = sum(
+            1
+            for part in latest_user.content
+            if isinstance(part, dict) and part.get("type") == "image_url"
+        )
+        if image_count > 20:
+            raise ValueError("单条消息最多可附加 20 张图片")
+        return self
+
 
 class AccountPoolForm(BaseModel):
     provider: Literal["gpt", "claude"] = "gpt"

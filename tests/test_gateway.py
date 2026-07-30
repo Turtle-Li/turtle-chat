@@ -807,6 +807,33 @@ def test_latest_empty_assistant_message_is_still_rejected() -> None:
     assert response.status_code == 422
 
 
+def test_latest_user_turn_rejects_more_than_twenty_images() -> None:
+    images = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"https://example.test/{index}.png"},
+        }
+        for index in range(21)
+    ]
+    with TestClient(create_app(settings())) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers=headers(),
+            json={
+                "model": "gpt-5-web",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "inspect"}, *images],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 422
+    assert "单条消息最多可附加 20 张图片" in response.text
+
+
 def test_image_url_count_reports_only_structured_media() -> None:
     assert _image_url_count(
         {
@@ -1709,6 +1736,148 @@ def test_stream_empty_result_fails_over_before_any_client_content() -> None:
     assert primary_lease["error_class"] == "upstream_empty_stream"
     assert affinity["preferred_account_id"] == "backup-account"
     assert affinity["last_migration_reason"] == "failover_empty_stream"
+
+
+def test_stream_error_event_fails_over_before_any_client_content() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(str(request.url.host))
+        if request.url.host == "upstream.test":
+            error = {
+                "error": {
+                    "message": "RuntimeError: Error in message stream",
+                }
+            }
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=f"data: {json.dumps(error)}\n\ndata: [DONE]\n\n",
+            )
+        answer = {
+            "id": "chatcmpl-backup",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "auto",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "backup stream answer"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=f"data: {json.dumps(answer)}\n\ndata: [DONE]\n\n",
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        add_memory_backup_account(client)
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers=headers(),
+            json={
+                "model": "gpt-5-web",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+                "turtle_request_id": "request-error-stream-failover",
+                "turtle_user_id": "user-a",
+                "turtle_chat_id": "chat-error-stream-failover",
+            },
+        ) as response:
+            lines = [line for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert hosts == ["upstream.test", "backup.test"]
+    assert lines[-1] == "data: [DONE]"
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in lines[:-1]
+    ]
+    assert "".join(
+        event["choices"][0]["delta"].get("content", "")
+        for event in events
+    ) == "backup stream answer"
+    assert "RuntimeError" not in "\n".join(lines)
+
+
+def test_midstream_error_is_sanitized_and_finalized_as_failure() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        answer = {
+            "id": "chatcmpl-partial",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "auto",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "partial answer"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        error = {
+            "error": {
+                "message": "RuntimeError: Error in message stream",
+            }
+        }
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=(
+                f"data: {json.dumps(answer)}\n\n"
+                f"data: {json.dumps(error)}\n\n"
+                "data: [DONE]\n\n"
+            ),
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            headers=headers(),
+            json={
+                "model": "gpt-5-web",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+                "turtle_request_id": "request-midstream-error",
+                "turtle_user_id": "user-a",
+                "turtle_chat_id": "chat-midstream-error",
+            },
+        ) as response:
+            lines = [line for line in response.iter_lines() if line]
+        lease = client.app.state.account_pool.store.leases[
+            "request-midstream-error"
+        ]
+
+    joined = "\n".join(lines)
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in lines[:-2]
+    ]
+    assert response.status_code == 200
+    assert "".join(
+        event["choices"][0]["delta"].get("content", "")
+        for event in events
+    ) == "partial answer"
+    assert "上游消息流异常，请重试" in joined
+    assert "RuntimeError" not in joined
+    assert lines[-1] == "data: [DONE]"
+    assert lease["outcome"] == "error"
+    assert lease["error_class"] == "upstream_stream"
 
 
 def test_account_pool_retries_explicit_limit_wrapped_as_upstream_500() -> None:

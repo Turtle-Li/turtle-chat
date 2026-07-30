@@ -518,6 +518,16 @@ def _sse_data_has_effective_content(data: str) -> bool:
     return _has_effective_stream_value(payload)
 
 
+def _sse_data_has_error(data: str) -> bool:
+    if data == "[DONE]":
+        return False
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(payload, dict) and bool(payload.get("error"))
+
+
 def _sse_data_has_answer_text(data: str) -> bool:
     if data == "[DONE]":
         return False
@@ -2166,6 +2176,9 @@ def create_app(
                         break
                     upstream_prefetched.append(data)
                     prefetched_bytes += len(data.encode("utf-8", errors="ignore"))
+                    if _sse_data_has_error(data):
+                        terminal_without_content = True
+                        break
                     if _sse_data_has_effective_content(data):
                         prefetched_effective = True
                         break
@@ -2373,11 +2386,21 @@ def create_app(
                         estimated_stream_completion_tokens or None
                     ),
                 )
-                logger.info(
-                    "request_completed id=%s total_ms=%d",
-                    request_id,
-                    int((time.monotonic() - started) * 1000),
-                )
+                elapsed_ms = int((time.monotonic() - started) * 1000)
+                if outcome == "success":
+                    logger.info(
+                        "request_completed id=%s total_ms=%d",
+                        request_id,
+                        elapsed_ms,
+                    )
+                else:
+                    logger.warning(
+                        "request_failed id=%s status=%d reason=%s total_ms=%d",
+                        request_id,
+                        status_code,
+                        error_class or "unknown",
+                        elapsed_ms,
+                    )
 
             try:
                 stream_content_tail = ""
@@ -2418,6 +2441,37 @@ def create_app(
                         for presented in presentation.feed(upstream_event)
                     ]
                     for event_index, normalized in enumerate(normalized_events):
+                        if _sse_data_has_error(normalized):
+                            stream_error = UpstreamFailure(
+                                502,
+                                "上游消息流异常，请重试",
+                            )
+                            await finalize(
+                                outcome="error",
+                                status_code=502,
+                                error_class="upstream_stream",
+                            )
+                            error_payload = {
+                                "error": {
+                                    "message": stream_error.message,
+                                    "type": "upstream_stream_error",
+                                    "code": None,
+                                }
+                            }
+                            yield (
+                                "data: "
+                                + json.dumps(
+                                    error_payload,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                                + "\n\n"
+                            ).encode()
+                            yield b"data: [DONE]\n\n"
+                            sent_done = True
+                            with contextlib.suppress(Exception):
+                                await upstream_response.aclose()
+                            return
                         event_has_effective_content = (
                             _sse_data_has_effective_content(normalized)
                         )
