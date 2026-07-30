@@ -1508,6 +1508,25 @@ def create_app(
             "data": data,
         }
 
+    @application.get("/v1/project/context")
+    async def project_context(
+        caller: ProjectCaller = Depends(require_call_key),
+    ) -> dict[str, Any]:
+        """Return the minimal caller scope needed by the loopback media proxy.
+
+        This route is not published by Open WebUI. It deliberately excludes
+        key material, balances, permissions, prompts, and Provider identity.
+        Authentication is performed on every request so revocation remains
+        immediate.
+        """
+
+        return {
+            "object": "project.context",
+            "project_key_id": caller.key_id,
+            "owner_user_id": caller.owner_user_id,
+            "is_master": caller.is_master,
+        }
+
     @application.post("/v1/chat/completions")
     async def completions(
         body: ChatCompletionRequest,

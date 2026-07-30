@@ -348,6 +348,12 @@ async def get_presigned_model_image_source(value: str, user) -> dict | None:
                 matches = result.scalars().all()
                 if len(matches) == 1:
                     file = FileModel.model_validate(matches[0])
+    return get_presigned_model_image_source_for_file(file, user)
+
+
+def get_presigned_model_image_source_for_file(file, user) -> dict | None:
+    """Seal a previously authorized file without repeating its database read."""
+
     if not file or (file.user_id != user.id and getattr(user, "role", "") != "admin"):
         return None
     meta = file.meta or {}

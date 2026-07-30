@@ -168,6 +168,20 @@ def test_project_api_key_is_owner_scoped_and_secret_is_returned_once() -> None:
         assert "api_key" not in listed.json()["items"][0]
 
         project_headers = {"Authorization": f"Bearer {secret}"}
+        context = client.get("/v1/project/context", headers=project_headers)
+        assert context.status_code == 200
+        assert context.json() == {
+            "object": "project.context",
+            "project_key_id": created.json()["id"],
+            "owner_user_id": "user-a",
+            "is_master": False,
+        }
+        master_context = client.get("/v1/project/context", headers=headers())
+        assert master_context.status_code == 200
+        assert master_context.json()["is_master"] is True
+        assert master_context.json()["project_key_id"] is None
+        assert master_context.json()["owner_user_id"] is None
+
         completion = client.post(
             "/v1/chat/completions",
             headers=project_headers,
