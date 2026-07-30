@@ -1,6 +1,8 @@
 (() => {
   "use strict";
   const API = "/api/v1/turtle/project-api";
+  const PROJECT_API_BASE = "https://api.chat.turtleligpt.com/v1";
+  const PROJECT_API_COMPAT_BASE = `${window.location.origin}/api/project/v1`;
   const token = () => {
     let value = localStorage.getItem("token") || "";
     try { value = JSON.parse(value); } catch (_) {}
@@ -19,7 +21,22 @@
     return payload;
   };
   const state={bundle:null,usage:null,offset:0,limit:100,revokeId:null};
-  document.querySelector("#api-base").textContent=`${window.location.origin}/api/project/v1`;
+  document.querySelector("#api-base").textContent=PROJECT_API_BASE;
+  document.querySelector("#api-base-compat").textContent=PROJECT_API_COMPAT_BASE;
+  document.querySelector("#quickstart-curl").textContent=[
+    `curl ${PROJECT_API_BASE}/chat/completions \\`,
+    '  -H "Authorization: Bearer $TURTLE_API_KEY" \\',
+    '  -H "Content-Type: application/json" \\',
+    '  -H "Idempotency-Key: request-$(date +%s)" \\',
+    "  --no-buffer \\",
+    '  -d \'{"model":"gpt-5-web","stream":true,"messages":[{"role":"user","content":"你好"}]}\'',
+  ].join("\n");
+  const copyText = async (value, button, completedLabel = "已复制") => {
+    await navigator.clipboard.writeText(value);
+    const previous = button.textContent;
+    button.textContent = completedLabel;
+    window.setTimeout(() => { button.textContent = previous; }, 1600);
+  };
   const summary=document.querySelector("#summary"),keys=document.querySelector("#keys"),records=document.querySelector("#records"),notice=document.querySelector("#notice"),filters=document.querySelector("#filters"),createForm=document.querySelector("#create-key");
   const renderSummary=()=>{
     const totals=state.usage?.totals||{};
@@ -55,10 +72,16 @@
   const load=async()=>{
     try{
       const hours=Number(filters.elements.hours.value)||24;
-      const bundle=await request(`/me?hours=${hours}`);
+      const [bundleResult,usageResult]=await Promise.allSettled([
+        request(`/me?hours=${hours}`),
+        request(usagePath()),
+      ]);
+      if(bundleResult.status==="rejected")throw bundleResult.reason;
+      const bundle=bundleResult.value;
       state.bundle=bundle;
       if(!bundle.enabled){notice.hidden=false;notice.textContent="管理员尚未为当前账号开通项目 API 权限。";summary.innerHTML="";document.querySelector(".layout").hidden=true;return}
-      document.querySelector(".layout").hidden=false;notice.hidden=true;state.usage=await request(usagePath());renderSummary();renderKeys();renderRecords();
+      if(usageResult.status==="rejected")throw usageResult.reason;
+      document.querySelector(".layout").hidden=false;notice.hidden=true;state.usage=usageResult.value;renderSummary();renderKeys();renderRecords();
     }catch(error){notice.hidden=false;notice.textContent=error.message}
   };
   filters.addEventListener("change",async()=>{state.offset=0;try{state.usage=await request(usagePath());renderSummary();renderRecords()}catch(error){notice.hidden=false;notice.textContent=error.message}});
@@ -66,6 +89,9 @@
   keys.addEventListener("click",(event)=>{const button=event.target.closest("[data-revoke]");if(!button)return;state.revokeId=button.dataset.revoke;document.querySelector("#revoke-dialog").showModal()});
   document.querySelector("#confirm-revoke").addEventListener("click",async(event)=>{if(!state.revokeId)return;event.currentTarget.disabled=true;try{await request(`/keys/${encodeURIComponent(state.revokeId)}`,{method:"DELETE"});document.querySelector("#revoke-dialog").close();state.revokeId=null;await load()}catch(error){notice.hidden=false;notice.textContent=error.message}finally{event.currentTarget.disabled=false}});
   document.querySelector("#copy-secret").addEventListener("click",async()=>{await navigator.clipboard.writeText(document.querySelector("#secret-value").textContent);document.querySelector("#copy-secret").textContent="已复制"});
+  document.querySelector("#copy-api-base").addEventListener("click",(event)=>void copyText(PROJECT_API_BASE,event.currentTarget));
+  document.querySelector("#copy-api-base-compat").addEventListener("click",(event)=>void copyText(PROJECT_API_COMPAT_BASE,event.currentTarget));
+  document.querySelector("#copy-quickstart").addEventListener("click",(event)=>void copyText(document.querySelector("#quickstart-curl").textContent,event.currentTarget,"cURL 已复制"));
   document.querySelector("#refresh").addEventListener("click",load);
   const changePage=async(delta)=>{state.offset=Math.max(0,state.offset+delta*state.limit);state.usage=await request(usagePath());renderSummary();renderRecords()};
   document.querySelector("#previous-page").addEventListener("click",()=>void changePage(-1));

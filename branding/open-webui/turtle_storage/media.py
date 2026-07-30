@@ -60,14 +60,12 @@ STREAM_MEDIA_PLACEHOLDER = "图片已生成，正在整理并保存…"
 
 
 def requested_image_count(prompt: str) -> int:
-    """Issue exactly one official image-generation operation per user send.
+    """Create one official ChatGPT Web task and trust its returned asset count.
 
-    ChatGPT exposes image creation as a separate, dynamic allowance and does
-    not publish a stable conversion from one chat message to multiple image
-    outputs. Keep the production path one-to-one until Turtle has a separate
-    per-successful-image reservation and accounting lane.
+    The desired number remains part of the natural-language prompt.  Turtle
+    must not turn it into repeated upstream requests: one official task may
+    legitimately return any number of image assets, all of which are retained.
     """
-    del prompt
     return 1
 
 

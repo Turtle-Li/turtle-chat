@@ -86,6 +86,52 @@ class ChatCompletionRequest(BaseModel):
         return self
 
 
+class ImageGenerationRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str = Field(default="gpt-image", min_length=1, max_length=80)
+    prompt: str = Field(min_length=1, max_length=32_000)
+    n: int = Field(default=1, ge=1, le=4)
+    response_format: Literal["url"] = "url"
+    turtle_account_pool_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+    )
+    turtle_user_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+    )
+    turtle_chat_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+    )
+    turtle_request_id: str | None = Field(
+        default=None,
+        min_length=8,
+        max_length=64,
+    )
+    turtle_required_quota_profiles: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+    )
+
+    @field_validator("turtle_required_quota_profiles")
+    @classmethod
+    def validate_quota_profiles(cls, value: list[str]) -> list[str]:
+        allowed = {"free", "go", "plus", "pro-5x", "pro-20x"}
+        normalized: list[str] = []
+        for item in value:
+            profile = str(item or "").strip().lower()
+            if profile not in allowed:
+                raise ValueError("图片账号套餐无效")
+            if profile not in normalized:
+                normalized.append(profile)
+        return normalized
+
+
 class AccountPoolForm(BaseModel):
     provider: Literal["gpt", "claude"] = "gpt"
     name: str = Field(min_length=1, max_length=60)

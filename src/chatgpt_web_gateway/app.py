@@ -52,6 +52,7 @@ from .models import (
     AccountPoolForm,
     AccountSettingsForm,
     ChatCompletionRequest,
+    ImageGenerationRequest,
     ProjectApiKeyForm,
     ProjectApiCreditGrantForm,
     ProjectApiPermissionForm,
@@ -1536,6 +1537,187 @@ def create_app(
             "owner_user_id": caller.owner_user_id,
             "is_master": caller.is_master,
         }
+
+    @application.post("/v1/images/generations")
+    async def image_generations(
+        body: ImageGenerationRequest,
+        request: Request,
+        caller: ProjectCaller = Depends(require_call_key),
+    ):
+        started = time.monotonic()
+        if not caller.is_master:
+            return _error(
+                403,
+                "项目 API 暂未开放图片生成",
+                "project_api_forbidden",
+            )
+        if not body.turtle_user_id:
+            return _error(
+                400,
+                "图片生成缺少用户路由信息",
+                "invalid_request_error",
+            )
+        required_profiles = frozenset(body.turtle_required_quota_profiles)
+        if not required_profiles:
+            return _error(
+                400,
+                "图片生成缺少独立套餐路由",
+                "invalid_request_error",
+            )
+        request_id = body.turtle_request_id or f"img-{uuid.uuid4().hex[:20]}"
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{8,64}", request_id):
+            return _error(
+                400,
+                "图片请求标识无效",
+                "invalid_request_error",
+            )
+
+        pool_id = body.turtle_account_pool_id or resolved.default_account_pool_id
+        upstream_payload = body.model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+        for field in (
+            "turtle_account_pool_id",
+            "turtle_user_id",
+            "turtle_chat_id",
+            "turtle_request_id",
+            "turtle_required_quota_profiles",
+        ):
+            upstream_payload.pop(field, None)
+        upstream_payload["n"] = 1
+        upstream_payload["response_format"] = "url"
+
+        generated: list[dict[str, Any]] = []
+        last_failure: tuple[int, str] | None = None
+        total_attempts = 0
+        logger.info(
+            "image_request_route id=%s official_tasks=1 chat_bound=%s profiles=%s",
+            request_id,
+            int(bool(body.turtle_chat_id)),
+            ",".join(sorted(required_profiles)),
+        )
+        attempted_account_ids: set[str] = set()
+        for attempt_no in range(
+            1,
+            resolved.account_failover_max_attempts + 1,
+        ):
+            total_attempts += 1
+            attempt_id = f"{request_id}-{attempt_no}"[:64]
+            try:
+                account_lease = await request.app.state.account_pool.acquire(
+                    pool_id=pool_id,
+                    request_id=attempt_id,
+                    user_id=body.turtle_user_id,
+                    chat_id=body.turtle_chat_id,
+                    selection_key="image:create",
+                    excluded_account_ids=frozenset(attempted_account_ids),
+                    required_quota_profiles=required_profiles,
+                    migration_reason_hint="image_profile_route",
+                )
+            except AccountUnavailable as exc:
+                last_failure = (503, str(exc))
+                break
+            attempted_account_ids.add(account_lease.account.id)
+            payload = dict(upstream_payload)
+            if body.turtle_chat_id:
+                payload["conversation_id"] = (
+                    _derive_upstream_conversation_key(
+                        resolved.gateway_api_key,
+                        account_lease.account.pool_id,
+                        body.turtle_chat_id,
+                    )
+                )
+            try:
+                upstream = await request.app.state.account_pool.client_for(
+                    account_lease.account
+                )
+                result = await upstream.image_generation(payload)
+                rows = result.get("data")
+                if not isinstance(rows, list) or not rows:
+                    raise UpstreamFailure(
+                        502,
+                        "上游返回空图片结果",
+                    )
+                generated = [
+                    dict(image)
+                    for image in rows
+                    if isinstance(image, dict) and image.get("url")
+                ]
+                if not generated:
+                    raise UpstreamFailure(
+                        502,
+                        "上游图片结果无效",
+                    )
+            except asyncio.CancelledError:
+                await account_lease.release(
+                    outcome="cancelled",
+                    status_code=499,
+                    error_class="client_cancelled",
+                )
+                raise
+            except UpstreamFailure as exc:
+                failover_reason = _safe_failover_reason(exc.status_code)
+                await account_lease.release(
+                    outcome="error",
+                    status_code=exc.status_code,
+                    error_class=failover_reason or "image_upstream",
+                    retry_after_seconds=exc.retry_after_seconds,
+                )
+                last_failure = (exc.status_code, exc.message)
+                if failover_reason is not None:
+                    logger.warning(
+                        "image_request_failover id=%s attempt=%d account=%s reason=%s status=%d",
+                        request_id,
+                        attempt_no,
+                        account_lease.account.id,
+                        failover_reason,
+                        exc.status_code,
+                    )
+                    continue
+                break
+            except Exception:
+                await account_lease.release(
+                    outcome="error",
+                    status_code=502,
+                    error_class="image_upstream",
+                )
+                last_failure = (502, "上游图片生成失败")
+                break
+
+            await account_lease.release(
+                outcome="success",
+                status_code=200,
+            )
+            logger.info(
+                "image_task_completed id=%s assets=%d account=%s",
+                request_id,
+                len(generated),
+                account_lease.account.id,
+            )
+            break
+
+        if not generated:
+            status_code, message = last_failure or (502, "上游图片生成失败")
+            logger.warning(
+                "image_request_failed id=%s status=%d assets=0 attempts=%d",
+                request_id,
+                status_code,
+                total_attempts,
+            )
+            return _error(status_code, message, "upstream_error")
+        response: dict[str, Any] = {
+            "created": int(time.time()),
+            "data": generated,
+        }
+        logger.info(
+            "image_request_completed id=%s official_tasks=1 assets=%d attempts=%d total_ms=%d",
+            request_id,
+            len(generated),
+            total_attempts,
+            int((time.monotonic() - started) * 1000),
+        )
+        return response
 
     @application.post("/v1/chat/completions")
     async def completions(

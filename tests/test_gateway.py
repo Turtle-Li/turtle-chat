@@ -834,6 +834,147 @@ def test_latest_user_turn_rejects_more_than_twenty_images() -> None:
     assert "单条消息最多可附加 20 张图片" in response.text
 
 
+def test_image_generation_keeps_all_task_assets_and_stable_chat() -> None:
+    observed: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/images/generations")
+        payload = json.loads(request.content)
+        observed.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "data": [
+                    {
+                        "url": (
+                            f"https://media.example.test/task-"
+                            f"{len(observed)}-asset-{index}.png"
+                        )
+                    }
+                    for index in range(10 if len(observed) == 1 else 2)
+                ],
+            },
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        client.app.state.account_pool.store.accounts["legacy-primary"][
+            "quota_profile"
+        ] = "plus"
+        response = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "ten product concepts",
+                "n": 1,
+                "response_format": "url",
+                "turtle_user_id": "user-image",
+                "turtle_chat_id": "chat-image-sticky",
+                "turtle_request_id": "img-request-sticky",
+                "turtle_account_pool_id": "gpt-default",
+                "turtle_required_quota_profiles": ["plus"],
+            },
+        )
+        follow_up = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "two more product concepts",
+                "n": 1,
+                "response_format": "url",
+                "turtle_user_id": "user-image",
+                "turtle_chat_id": "chat-image-sticky",
+                "turtle_request_id": "img-request-follow-up",
+                "turtle_account_pool_id": "gpt-default",
+                "turtle_required_quota_profiles": ["plus"],
+            },
+        )
+        snapshot = client.get(
+            "/internal/account-pools",
+            headers=headers(),
+        ).json()
+
+    assert response.status_code == 200
+    assert follow_up.status_code == 200
+    assert len(response.json()["data"]) == 10
+    assert len(follow_up.json()["data"]) == 2
+    assert len(observed) == 2
+    assert all(item["n"] == 1 for item in observed)
+    assert observed[0]["conversation_id"] == observed[1]["conversation_id"]
+    assert observed[0]["conversation_id"] == _derive_upstream_conversation_key(
+        "gateway-test-key",
+        "gpt-default",
+        "chat-image-sticky",
+    )
+    assert all(
+        "turtle_user_id" not in item
+        and "turtle_chat_id" not in item
+        and "turtle_required_quota_profiles" not in item
+        for item in observed
+    )
+    account = next(
+        item
+        for item in snapshot["accounts"]
+        if item["id"] == "legacy-primary"
+    )
+    lane = next(
+        item
+        for item in account["quota"]["lanes"]
+        if item["selection_key"] == "image:create"
+    )
+    assert lane["used_count"] == 2
+    assert lane["active_count"] == 0
+
+
+def test_image_generation_never_spills_plus_request_into_pro_profile() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"url": "https://media.example.test/generated.png"}
+                ]
+            },
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        client.app.state.account_pool.store.accounts["legacy-primary"][
+            "quota_profile"
+        ] = "pro-20x"
+        response = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "one product concept",
+                "n": 1,
+                "response_format": "url",
+                "turtle_user_id": "user-plus",
+                "turtle_request_id": "img-plus-isolation",
+                "turtle_required_quota_profiles": ["plus"],
+            },
+        )
+
+    assert response.status_code == 503
+    assert calls == 0
+
+
 def test_image_url_count_reports_only_structured_media() -> None:
     assert _image_url_count(
         {

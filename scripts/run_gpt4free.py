@@ -9,6 +9,7 @@ PINNED_COMMIT = "48d845749f5b4c0148a9188f33ae498f1f41c21d"
 OVERLAY_PATH = Path("patches/gpt4free-openaiaccount-gpt56.patch")
 OVERLAY_FILES = {
     "g4f/api/__init__.py",
+    "g4f/api/stubs.py",
     "g4f/client/__init__.py",
     "g4f/Provider/openai/models.py",
     "g4f/Provider/needs_auth/OpenaiChat.py",

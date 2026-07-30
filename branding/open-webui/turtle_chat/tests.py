@@ -1845,6 +1845,23 @@ class ChatStoreTests(unittest.TestCase):
         self.assertTrue(plus["gpt-5-3:standard"]["enabled"])
         self.assertEqual(
             (
+                free["image:create"]["limit_count"],
+                go["image:create"]["limit_count"],
+                plus["image:create"]["limit_count"],
+                pro_5x["image:create"]["limit_count"],
+                pro_20x["image:create"]["limit_count"],
+            ),
+            (2, 10, 40, 200, 800),
+        )
+        self.assertTrue(
+            all(
+                rules["image:create"]["window_seconds"] > 0
+                for rules in (free, go, plus, pro_5x, pro_20x)
+            )
+        )
+
+        self.assertEqual(
+            (
                 plus["gpt-5-3:standard"]["limit_count"],
                 plus["gpt-5-3:standard"]["window_seconds"],
             ),
@@ -1895,6 +1912,44 @@ class ChatStoreTests(unittest.TestCase):
             self.assertIn(group_id, groups)
             self.assertEqual(groups[group_id]["account_pool_id"], "gpt-default")
             self.assertTrue(groups[group_id]["is_plan_template"])
+
+    def test_image_routing_is_plan_strict_and_separate_from_text(self):
+        self.store.assign_model_group(
+            "plus-user",
+            "gpt",
+            "gpt-plus-plan",
+            assigned_by="admin",
+        )
+        plus = self.store.image_routing_for_user("plus-user", "user")
+        self.assertEqual(plus["required_quota_profiles"], ["plus"])
+
+        self.store.assign_model_group(
+            "pro-user",
+            "gpt",
+            "gpt-pro-5x",
+            assigned_by="admin",
+        )
+        pro = self.store.image_routing_for_user("pro-user", "user")
+        self.assertEqual(
+            pro["required_quota_profiles"],
+            ["pro-5x", "pro-20x"],
+        )
+
+        reservation = self.store.reserve(
+            "plus-user",
+            "user",
+            model_id="gpt-image",
+            version="image",
+            level="create",
+        )
+        self.assertEqual(reservation.selection_key, "image:create")
+        self.store.finalize(reservation.id, "committed")
+        summary = self.store.quota_summary("plus-user", "user")["models"]
+        self.assertEqual(summary["image:create"]["remaining_count"], 39)
+        self.assertEqual(
+            summary["gpt-5-5:instant"]["remaining_count"],
+            160,
+        )
 
     def test_gpt_plan_groups_are_listed_from_smallest_to_largest(self):
         ordered = [
@@ -2178,7 +2233,14 @@ class ChatStoreTests(unittest.TestCase):
             updated_by="admin",
         )
         self.assertEqual(group["provider_family"], "gpt")
-        self.assertEqual(len(group["rules"]), 7)
+        self.assertEqual(
+            len(group["rules"]),
+            sum(selection["family"] == "gpt" for selection in SELECTIONS),
+        )
+        self.assertIn(
+            "image:create",
+            {rule["selection_key"] for rule in group["rules"]},
+        )
         self.store.assign_model_group(
             "user", "gpt", group["id"], assigned_by="admin"
         )
@@ -2813,6 +2875,50 @@ class MeteringTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.concurrency_patcher.stop()
         self.environment.stop()
+
+    async def test_one_official_image_task_uses_one_independent_reservation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            from . import metering
+
+            store = ChatStore(Path(temp) / "chat.db")
+            store.assign_model_group(
+                "image-user",
+                "gpt",
+                "gpt-plus-plan",
+                assigned_by="admin",
+            )
+            original = metering.CHAT_STORE
+            metering.CHAT_STORE = store
+            try:
+                context = await metering.prepare_image_generation(
+                    SimpleNamespace(id="image-user", role="user"),
+                    chat_id="chat-sticky",
+                )
+                self.assertEqual(
+                    context.required_quota_profiles,
+                    ["plus"],
+                )
+                self.assertEqual(
+                    context.routing_payload()["turtle_chat_id"],
+                    "chat-sticky",
+                )
+                await metering.finalize_image_generation(context, True)
+                recent = store.recent_usage("image-user")
+                self.assertEqual(
+                    [item["status"] for item in recent],
+                    ["committed"],
+                )
+                summary = store.quota_summary("image-user", "user")["models"]
+                self.assertEqual(
+                    summary["image:create"]["remaining_count"],
+                    39,
+                )
+                self.assertEqual(
+                    summary["gpt-5-5:instant"]["remaining_count"],
+                    160,
+                )
+            finally:
+                metering.CHAT_STORE = original
 
     async def test_existing_chat_accepts_only_its_provider(self):
         with tempfile.TemporaryDirectory() as temp:

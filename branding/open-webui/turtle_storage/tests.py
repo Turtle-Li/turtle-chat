@@ -705,12 +705,12 @@ class ModelImageSourceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GeneratedMediaPatternTests(unittest.TestCase):
-    def test_each_send_issues_exactly_one_official_image_generation(self):
+    def test_image_count_never_replays_one_official_task(self):
         self.assertEqual(requested_image_count("请生成两张不同的图片"), 1)
         self.assertEqual(requested_image_count("生成 4 幅海龟图像"), 1)
-        self.assertEqual(requested_image_count("Create three distinct images"), 1)
+        self.assertEqual(requested_image_count("Create ten distinct images"), 1)
         self.assertEqual(requested_image_count("请修改第二张图"), 1)
-        self.assertEqual(requested_image_count("请生成五张图片"), 1)
+        self.assertEqual(requested_image_count("请生成十张图片"), 1)
 
     def test_remote_image_and_video_urls_are_detected(self):
         text = (

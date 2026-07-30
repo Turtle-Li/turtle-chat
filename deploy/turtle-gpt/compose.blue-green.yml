@@ -189,6 +189,8 @@ services:
     environment:
       <<: *open-webui-environment
       OPENAI_API_BASE_URLS: http://gateway-blue:8000/v1
+      IMAGES_OPENAI_API_BASE_URL: http://gateway-blue:8000/v1
+      IMAGES_OPENAI_API_KEY: ${GATEWAY_API_KEY:?set GATEWAY_API_KEY in .env}
 
   gateway-green:
     <<: *gateway-common
@@ -202,6 +204,8 @@ services:
     environment:
       <<: *open-webui-environment
       OPENAI_API_BASE_URLS: http://gateway-green:8000/v1
+      IMAGES_OPENAI_API_BASE_URL: http://gateway-green:8000/v1
+      IMAGES_OPENAI_API_KEY: ${GATEWAY_API_KEY:?set GATEWAY_API_KEY in .env}
 
 volumes:
   open-webui-data:

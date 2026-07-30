@@ -8,6 +8,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "production.yml"
 DEPLOY_SCRIPT = ROOT / "deploy" / "turtle-gpt" / "remote" / "deploy-release"
 PULL_PUBLIC_SCRIPT = ROOT / "deploy" / "turtle-gpt" / "remote" / "pull-public-release"
 STOP_INACTIVE_SCRIPT = ROOT / "deploy" / "turtle-gpt" / "remote" / "stop-inactive-slot"
+COMPOSE = ROOT / "deploy" / "turtle-gpt" / "compose.blue-green.yml"
 
 
 def test_public_workflow_builds_commit_images_without_deployment_secrets() -> None:
@@ -91,3 +92,17 @@ def test_inactive_slot_drain_cannot_stop_a_reused_candidate_slot() -> None:
     assert "Timers created before release guards were introduced" in stop_inactive
     assert 'revision != "$expected_release"' in stop_inactive
     assert 'org.opencontainers.image.revision' in stop_inactive
+
+
+def test_blue_green_image_generation_uses_its_gateway_credentials() -> None:
+    compose = COMPOSE.read_text(encoding="utf-8")
+
+    assert "IMAGES_OPENAI_API_BASE_URL: http://gateway-blue:8000/v1" in compose
+    assert "IMAGES_OPENAI_API_BASE_URL: http://gateway-green:8000/v1" in compose
+    assert (
+        compose.count(
+            "IMAGES_OPENAI_API_KEY: ${GATEWAY_API_KEY:"
+            "?set GATEWAY_API_KEY in .env}"
+        )
+        == 2
+    )

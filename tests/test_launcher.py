@@ -357,13 +357,16 @@ def test_gpt4free_overlay_seals_only_exact_sandbox_zip_downloads() -> None:
     assert "diff --git a/g4f/client/__init__.py b/g4f/client/__init__.py" in overlay
     assert "g4f/client/__init__.py" in LAUNCHER_MODULE.OVERLAY_FILES
     assert "g4f/client/stubs.py" in LAUNCHER_MODULE.OVERLAY_FILES
+    assert "g4f/api/stubs.py" in LAUNCHER_MODULE.OVERLAY_FILES
     assert "g4f/providers/tool_support.py" in LAUNCHER_MODULE.OVERLAY_FILES
-    assert '+        requested_outputs = kwargs.pop("n", 1)' in overlay
-    assert (
-        '+        repeat_count = requested_outputs if provider_name == "OpenaiAccount" else 1'
-        in overlay
-    )
-    assert "+        for _ in range(repeat_count):" in overlay
+    assert '+        if provider_name == "OpenaiAccount":' in overlay
+    assert "+            # Never replay the prompt to emulate the Platform API's `n`." in overlay
+    assert '+            kwargs.pop("n", None)' in overlay
+    assert "+        urls = list(dict.fromkeys(urls))" in overlay
+    assert "+                belongs_to_current_task = (" in overlay
+    assert '+                "turtle_emitted_asset_ids",' in overlay
+    assert "+            conversation.turtle_emitted_asset_ids = set()" in overlay
+    assert "+    conversation_id: Optional[str] = None" in overlay
     assert '+    r"/interpreter/download$"' in overlay
     assert '+    if set(query) != {"message_id", "sandbox_path"}:' in overlay
     assert '+    if not sandbox_path.startswith("/mnt/data/"):' in overlay

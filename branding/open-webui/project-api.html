@@ -7,9 +7,9 @@
     <meta name="theme-color" content="#07131f" />
     <title>API 密钥 · Turtle’s Chat</title>
     <link rel="icon" type="image/png" href="/static/favicon.png" />
-    <link rel="stylesheet" href="/static/turtle-project-api.css?v=20260725.2" />
-    <style>.endpoint{display:flex;align-items:center;gap:14px;padding:13px 16px;margin-bottom:18px;border:1px solid var(--line);border-radius:13px;background:#0b1b28}.endpoint span{color:var(--muted)}.endpoint code{flex:1;min-width:0;overflow:auto;color:var(--cyan)}.pager{display:flex;justify-content:flex-end;align-items:center;gap:12px;padding:13px 18px}.pager button{background:transparent;color:var(--text);border:1px solid var(--line);padding:7px 11px}.pager button:disabled{opacity:.35;cursor:default}.pager span{color:var(--muted);font-size:12px}@media(max-width:600px){.endpoint{align-items:flex-start;flex-direction:column;gap:5px}.endpoint code{width:100%;white-space:normal;overflow-wrap:anywhere}.endpoint small{color:var(--muted)}}</style>
-    <script defer src="/static/turtle-project-api.js?v=20260725.3"></script>
+    <link rel="stylesheet" href="/static/turtle-project-api.css?v=20260730.1" />
+    <style>.pager{display:flex;justify-content:flex-end;align-items:center;gap:12px;padding:13px 18px}.pager button{background:transparent;color:var(--text);border:1px solid var(--line);padding:7px 11px}.pager button:disabled{opacity:.35;cursor:default}.pager span{color:var(--muted);font-size:12px}</style>
+    <script defer src="/static/turtle-project-api.js?v=20260730.1"></script>
   </head>
   <body>
     <header class="topbar">
@@ -22,7 +22,33 @@
         <button type="button" id="refresh">刷新</button>
       </section>
       <div id="notice" class="notice" hidden></div>
-      <section class="endpoint"><span>OpenAI 兼容 Base URL</span><code id="api-base"></code><small>模型：gpt-5-web · 每次调用必须发送 Idempotency-Key</small></section>
+      <section class="endpoint" aria-labelledby="endpoint-title">
+        <div class="endpoint-copy">
+          <span>RECOMMENDED EDGE</span>
+          <h2 id="endpoint-title">自动化优先使用独立 API 入口</h2>
+          <p>直连源站的 API 专用域名，不经过页面 CDN；鉴权、额度、模型调度与旧入口完全一致。</p>
+        </div>
+        <div class="endpoint-values">
+          <div class="endpoint-row">
+            <span>推荐 Base URL</span>
+            <code id="api-base"></code>
+            <button type="button" id="copy-api-base">复制</button>
+          </div>
+          <div class="endpoint-row endpoint-row-secondary">
+            <span>兼容旧地址</span>
+            <code id="api-base-compat"></code>
+            <button type="button" id="copy-api-base-compat">复制</button>
+          </div>
+          <small>模型：gpt-5-web · 每次逻辑调用必须发送稳定的 Idempotency-Key · 收到 429 时按 Retry-After 重试</small>
+        </div>
+      </section>
+      <section class="quickstart">
+        <header>
+          <div><span>QUICK START</span><h2>最短接入示例</h2><p>保持一个 HTTP 连接池并开启流式响应；图片先预留，再由客户端直接 PUT 到返回的 COS 地址。</p></div>
+          <button type="button" id="copy-quickstart">复制 cURL</button>
+        </header>
+        <pre><code id="quickstart-curl"></code></pre>
+      </section>
       <section id="summary" class="summary" aria-live="polite"></section>
       <section class="layout">
         <article class="panel">

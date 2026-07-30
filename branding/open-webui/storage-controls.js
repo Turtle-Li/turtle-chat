@@ -4,6 +4,7 @@
   const API_ROOT = "/api/v1/turtle/storage";
   const CHAT_API_ROOT = "/api/v1/turtle/chat";
   const PROJECT_API_ROOT = "/api/v1/turtle/project-api";
+  const PROJECT_API_PUBLIC_BASE = "https://api.chat.turtleligpt.com/v1";
   const RICH_REFERENCE_PREFIX = "/turtle/ref/v1/";
   const UPLOAD_PATHS = new Set(["/api/v1/files", "/api/v1/files/"]);
   const MANAGED_IMAGE_SELECTOR =
@@ -2841,9 +2842,10 @@
         <article><span>有效密钥</span><strong>${projectNumber(activeKeys)} / ${projectNumber(projectPanelState.bundle?.max_keys || 5)}</strong><small>管理员设置的账号上限</small></article>
       </section>
       <section class="turtle-project-endpoint">
-        <div><span class="turtle-overline">OPENAI COMPATIBLE</span><h3>项目调用地址</h3><p>每个项目使用独立密钥，便于追踪美元消耗、Token 和异常来源。</p></div>
+        <div><span class="turtle-overline">RECOMMENDED EDGE</span><h3>项目调用地址</h3><p>自动化优先使用独立 API 入口；旧页面地址继续兼容，不需要迁移已有密钥。</p></div>
         <dl>
-          <div><dt>Base URL</dt><dd><code>${escapeHtml(`${window.location.origin}/api/project/v1`)}</code></dd></div>
+          <div><dt>推荐 Base URL</dt><dd><button type="button" data-project-copy-endpoint="${escapeHtml(PROJECT_API_PUBLIC_BASE)}" title="复制推荐 Base URL" style="display:grid;width:100%;grid-template-columns:minmax(0,1fr) auto;gap:.55rem;align-items:center;padding:0;border:0;background:transparent;color:inherit;text-align:left"><code>${escapeHtml(PROJECT_API_PUBLIC_BASE)}</code><span style="color:var(--turtle-cyan);font-size:.58rem">复制</span></button></dd></div>
+          <div><dt>兼容旧地址</dt><dd><code>${escapeHtml(`${window.location.origin}/api/project/v1`)}</code></dd></div>
           <div><dt>模型</dt><dd><code>gpt-5-web</code></dd></div>
           <div><dt>当前范围</dt><dd>最近 ${projectPanelState.hours === 24 ? "24 小时" : projectPanelState.hours === 168 ? "7 天" : "30 天"} · ${projectNumber(totals.requests)} 次 GPT 请求</dd></div>
         </dl>
@@ -2908,6 +2910,18 @@
     const body = modalBody();
     if (!body) return;
     body.onclick = async (event) => {
+      const endpointCopy = event.target.closest("[data-project-copy-endpoint]");
+      if (endpointCopy) {
+        await navigator.clipboard.writeText(endpointCopy.dataset.projectCopyEndpoint);
+        const label = endpointCopy.querySelector("span");
+        if (label) {
+          label.textContent = "已复制";
+          window.setTimeout(() => {
+            if (label.isConnected) label.textContent = "复制";
+          }, 1600);
+        }
+        return;
+      }
       const copy = event.target.closest("[data-project-copy-secret]");
       if (copy) {
         await navigator.clipboard.writeText(projectPanelState.newSecret);
@@ -2987,10 +3001,16 @@
     const body = modalBody();
     if (!body) return;
     try {
-      const bundle = await projectApiFetch(`/me?hours=${projectPanelState.hours}`);
+      const [bundleResult, usageResult] = await Promise.allSettled([
+        projectApiFetch(`/me?hours=${projectPanelState.hours}`),
+        projectApiFetch(projectUsagePath()),
+      ]);
+      if (bundleResult.status === "rejected") throw bundleResult.reason;
+      const bundle = bundleResult.value;
       if (!bundle.enabled) throw new Error("管理员尚未为当前账号开通 API 密钥权限");
+      if (usageResult.status === "rejected") throw usageResult.reason;
       projectPanelState.bundle = bundle;
-      projectPanelState.usage = await projectApiFetch(projectUsagePath());
+      projectPanelState.usage = usageResult.value;
       renderProjectPanel();
     } catch (error) {
       if (body) body.innerHTML = `<div class="turtle-storage-error"><span>${escapeHtml(error?.message || "API 密钥面板读取失败")}</span><button type="button" data-project-retry>重新加载</button></div>`;

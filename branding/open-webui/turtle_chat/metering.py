@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -111,6 +112,28 @@ class ChatRequestContext:
         return self.reservation.selection_key if self.reservation is not None else None
 
 
+@dataclass(slots=True)
+class ImageGenerationContext:
+    reservation: Reservation
+    request_id: str
+    account_pool_id: str
+    required_quota_profiles: list[str]
+    chat_id: str | None = None
+    completed: bool = False
+
+    def routing_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "turtle_request_id": self.request_id,
+            "turtle_account_pool_id": self.account_pool_id,
+            "turtle_required_quota_profiles": list(
+                self.required_quota_profiles
+            ),
+        }
+        if self.chat_id:
+            payload["turtle_chat_id"] = self.chat_id
+        return payload
+
+
 def _request_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ChatQueueTimeout):
         return HTTPException(
@@ -131,6 +154,109 @@ def _request_http_error(exc: Exception) -> HTTPException:
         status_code=status.HTTP_409_CONFLICT,
         detail={"code": "chat_queue_conflict", "message": str(exc)},
     )
+
+
+async def prepare_image_generation(
+    user,
+    *,
+    chat_id: str | None = None,
+) -> ImageGenerationContext:
+    """Reserve one independent quota unit for one official image task."""
+    try:
+        if SUBSCRIPTION_CACHE.store is CHAT_STORE:
+            await SUBSCRIPTION_CACHE.require_active(user.id, user.role)
+        else:
+            await asyncio.to_thread(
+                CHAT_STORE.require_active_subscription,
+                user.id,
+                user.role,
+            )
+    except ChatSubscriptionError as exc:
+        subscription = exc.subscription
+        subscription_status = str(subscription.get("status") or "inactive")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": f"chat_subscription_{subscription_status}",
+                "message": str(exc),
+                "subscription": subscription,
+            },
+        ) from exc
+
+    routing = await asyncio.to_thread(
+        CHAT_STORE.image_routing_for_user,
+        user.id,
+        user.role,
+    )
+    request_id = f"img-{uuid.uuid4().hex[:20]}"
+    queued_at_ms = _now_ms()
+    try:
+        reservation = await asyncio.to_thread(
+            CHAT_STORE.reserve,
+            user.id,
+            user.role,
+            version="image",
+            level="create",
+            model_id="gpt-image",
+            request_id=request_id,
+            queued_at_ms=queued_at_ms,
+            admitted_at_ms=queued_at_ms,
+        )
+    except ChatModelQuotaError as exc:
+        retry_after = (
+            max(1, int(exc.reset_at - time.time())) if exc.reset_at else 60
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "image_quota_exceeded",
+                "message": str(exc),
+                "selection_key": exc.selection_key,
+                "reset_at": exc.reset_at,
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        ) from exc
+    except ChatPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "image_generation_forbidden",
+                "message": str(exc),
+            },
+        ) from exc
+
+    return ImageGenerationContext(
+        reservation=reservation,
+        request_id=request_id,
+        account_pool_id=str(routing["account_pool_id"]),
+        required_quota_profiles=[
+            str(value) for value in routing["required_quota_profiles"]
+        ],
+        chat_id=str(chat_id) if chat_id else None,
+    )
+
+
+async def finalize_image_generation(
+    context: ImageGenerationContext | None,
+    successful: bool,
+) -> None:
+    """Commit exactly one successful official task, regardless of asset count."""
+
+    if context is None or context.completed:
+        return
+    context.completed = True
+    await asyncio.to_thread(
+        CHAT_STORE.finalize,
+        context.reservation.id,
+        "committed" if successful else "released",
+    )
+
+
+async def release_image_generation(
+    context: ImageGenerationContext | None,
+) -> None:
+    await finalize_image_generation(context, False)
 
 
 async def prepare_chat_request(

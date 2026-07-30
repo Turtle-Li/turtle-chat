@@ -171,6 +171,7 @@ class AccountStore(Protocol):
         lease_seconds: int,
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
+        required_quota_profiles: frozenset[str] = frozenset(),
         migration_reason_hint: str | None = None,
     ) -> UpstreamAccount: ...
 
@@ -901,6 +902,7 @@ class MemoryAccountStore:
         lease_seconds: int,
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
+        required_quota_profiles: frozenset[str] = frozenset(),
         migration_reason_hint: str | None = None,
     ) -> UpstreamAccount:
         with self._lock:
@@ -941,6 +943,11 @@ class MemoryAccountStore:
                 item["active"] = active_by_account[value["id"]]
                 item["base_eligible"] = (
                     str(item["id"]) not in excluded_account_ids
+                    and (
+                        not required_quota_profiles
+                        or str(item.get("quota_profile") or "untracked")
+                        in required_quota_profiles
+                    )
                     and self._admission_eligible(item, now)
                 )
                 item["provider"] = provider
@@ -1975,6 +1982,7 @@ class PostgresAccountStore:
         lease_seconds: int,
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
+        required_quota_profiles: frozenset[str] = frozenset(),
         migration_reason_hint: str | None = None,
     ) -> UpstreamAccount:
         now = _now()
@@ -2077,6 +2085,11 @@ class PostgresAccountStore:
                     item["provider"] = provider
                     item["base_eligible"] = (
                         str(item["id"]) not in excluded_account_ids
+                        and (
+                            not required_quota_profiles
+                            or str(item.get("quota_profile") or "untracked")
+                            in required_quota_profiles
+                        )
                         and bool(item.get("enabled"))
                         and item.get("status") == "ready"
                         and item.get("session_state") == "valid"
@@ -3061,6 +3074,7 @@ class AccountPoolRouter:
         chat_id: str | None,
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
+        required_quota_profiles: frozenset[str] = frozenset(),
         migration_reason_hint: str | None = None,
     ) -> AccountLease:
         normalized_request_id = request_id if REQUEST_ID_RE.fullmatch(request_id) else uuid.uuid4().hex[:12]
@@ -3073,6 +3087,7 @@ class AccountPoolRouter:
             lease_seconds=self.lease_seconds,
             selection_key=selection_key,
             excluded_account_ids=excluded_account_ids,
+            required_quota_profiles=required_quota_profiles,
             migration_reason_hint=migration_reason_hint,
         )
         lease = AccountLease(self, normalized_request_id, account)

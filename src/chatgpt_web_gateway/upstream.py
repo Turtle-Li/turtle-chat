@@ -388,6 +388,33 @@ class UpstreamClient:
             raise UpstreamFailure(502, "upstream returned an invalid response object")
         return value
 
+    async def image_generation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            response = await self._client.post(
+                "/images/generations",
+                json=payload,
+            )
+        except httpx.HTTPError as exc:
+            raise UpstreamFailure(
+                502,
+                f"upstream image transport error: {redact(exc)}",
+            ) from exc
+        if response.is_error:
+            await self._raise_for_status(response)
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise UpstreamFailure(
+                502,
+                "upstream image response was invalid JSON",
+            ) from exc
+        if not isinstance(value, dict) or not isinstance(value.get("data"), list):
+            raise UpstreamFailure(
+                502,
+                "upstream image response was invalid",
+            )
+        return value
+
     async def open_stream(self, payload: dict[str, Any]) -> httpx.Response:
         request = self._client.build_request("POST", "/chat/completions", json=payload)
         try:

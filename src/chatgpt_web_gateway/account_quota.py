@@ -42,6 +42,7 @@ SELECTION_LABELS: dict[str, str] = {
     "gpt-5-5:instant": "GPT-5.5 极速",
     "gpt-5-3:standard": "GPT-5.3",
     "o3:standard": "o3",
+    "image:create": "ChatGPT 图片生图",
 }
 SELECTION_KEYS = tuple(SELECTION_LABELS)
 
@@ -131,6 +132,17 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
             ),
             "gpt-5-3:standard": _lane(False),
             "o3:standard": _lane(False),
+            "image:create": _lane(
+                True,
+                2,
+                24 * 60 * 60,
+                source="turtle_recommendation",
+                source_note=(
+                    "图片额度与文字额度独立；每次官方生图任务计 1 次，"
+                    "任务返回多张仍计 1 次；官方 Free 固定次数动态变化。"
+                ),
+                reserve_ratio=0,
+            ),
         },
     },
     "go": {
@@ -154,6 +166,17 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
             ),
             "gpt-5-3:standard": _lane(False),
             "o3:standard": _lane(False),
+            "image:create": _lane(
+                True,
+                10,
+                24 * 60 * 60,
+                source="turtle_recommendation",
+                source_note=(
+                    "图片额度与文字额度独立；每次官方生图任务计 1 次，"
+                    "任务返回多张仍计 1 次；官方 Go 固定次数未公开。"
+                ),
+                reserve_ratio=0.1,
+            ),
         },
     },
     "plus": {
@@ -210,6 +233,18 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
                 source_note="Plus 官方为 100 次/周，从首次使用起七天重置。",
                 reserve_ratio=0.05,
             ),
+            "image:create": _lane(
+                True,
+                40,
+                3 * 60 * 60,
+                source="turtle_recommendation",
+                source_note=(
+                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
+                    "以历史常见 50/3h 留出 20% 调度余量；"
+                    "官方当前未公布固定生图次数。"
+                ),
+                reserve_ratio=0.1,
+            ),
         },
     },
     "pro-5x": {
@@ -244,6 +279,17 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
                 source="official_dynamic",
                 source_note="Pro 官方为不设固定次数，仍受防滥用护栏约束。",
             ),
+            "image:create": _lane(
+                True,
+                200,
+                3 * 60 * 60,
+                source="official_multiplier",
+                source_note=(
+                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
+                    "按本站 Plus 图片基线的 5 倍调度。"
+                ),
+                reserve_ratio=0.1,
+            ),
         },
     },
     "pro-20x": {
@@ -277,6 +323,17 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
                 0,
                 source="official_dynamic",
                 source_note="Pro 官方为不设固定次数，仍受防滥用护栏约束。",
+            ),
+            "image:create": _lane(
+                True,
+                800,
+                3 * 60 * 60,
+                source="official_multiplier",
+                source_note=(
+                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
+                    "按本站 Plus 图片基线的 20 倍调度。"
+                ),
+                reserve_ratio=0.1,
             ),
         },
     },

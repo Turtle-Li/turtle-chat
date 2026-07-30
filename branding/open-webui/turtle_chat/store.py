@@ -111,6 +111,16 @@ SELECTIONS: tuple[dict[str, Any], ...] = (
         "level_label": "推理",
     },
     {
+        "key": "image:create",
+        "model_id": "gpt-image",
+        "family": "gpt",
+        "verification_state": "verified",
+        "version": "image",
+        "version_label": "ChatGPT 图片",
+        "level": "create",
+        "level_label": "生图",
+    },
+    {
         "key": "claude-sonnet-5:standard",
         "model_id": "claude-web",
         "family": "claude",
@@ -176,6 +186,7 @@ DEFAULT_USER_SELECTIONS = (
     "gpt-5-5:instant",
     "gpt-5-3:standard",
     "o3:standard",
+    "image:create",
     "claude-sonnet-5:standard",
     "claude-haiku-4-5:fast",
 )
@@ -224,6 +235,7 @@ DEFAULT_GROUPS: tuple[dict[str, Any], ...] = (
             "gpt-5-5:instant": _rule(True, 80, 3 * 60 * 60),
             "gpt-5-3:standard": _rule(True, None, 0),
             "o3:standard": _rule(True, 100, 7 * 24 * 60 * 60, "latest:high"),
+            "image:create": _rule(True, 20, 3 * 60 * 60),
             "claude-sonnet-5:standard": _rule(
                 True, 30, 5 * 60 * 60, "claude-haiku-4-5:fast"
             ),
@@ -250,6 +262,7 @@ DEFAULT_GROUPS: tuple[dict[str, Any], ...] = (
             "gpt-5-5:instant": _rule(True, 400, 3 * 60 * 60),
             "gpt-5-3:standard": _rule(True, None, 0),
             "o3:standard": _rule(True, None, 0),
+            "image:create": _rule(True, 200, 3 * 60 * 60),
             "claude-sonnet-5:standard": _rule(
                 True, 150, 5 * 60 * 60, "claude-haiku-4-5:fast"
             ),
@@ -337,6 +350,16 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
             ),
             "gpt-5-3:standard": _rule(False, None, 0, source="not_in_plan"),
             "o3:standard": _rule(False, None, 0, source="not_in_plan"),
+            "image:create": _rule(
+                True,
+                2,
+                24 * 60 * 60,
+                source="site_rule",
+                source_note=(
+                    "图片额度独立于文字消息；每次官方生图任务计 1 次，"
+                    "任务返回多张仍计 1 次；官方 Free 上限动态变化。"
+                ),
+            ),
         },
     },
     {
@@ -368,6 +391,16 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
             ),
             "gpt-5-3:standard": _rule(False, None, 0, source="not_in_plan"),
             "o3:standard": _rule(False, None, 0, source="not_in_plan"),
+            "image:create": _rule(
+                True,
+                10,
+                24 * 60 * 60,
+                source="site_rule",
+                source_note=(
+                    "图片额度独立于文字消息；每次官方生图任务计 1 次，"
+                    "任务返回多张仍计 1 次；官方 Go 固定次数未公开。"
+                ),
+            ),
         },
     },
     {
@@ -430,6 +463,17 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
                 source="official_published",
                 source_note="Plus 官方为 100 次/周，从首次使用起七天重置。",
             ),
+            "image:create": _rule(
+                True,
+                40,
+                3 * 60 * 60,
+                source="site_rule",
+                source_note=(
+                    "图片额度独立于文字消息；每次官方生图任务计 1 次，"
+                    "任务返回多张仍计 1 次；以历史常见 50/3h 留出 20% "
+                    "安全余量，官方当前未公布固定值。"
+                ),
+            ),
         },
     },
     {
@@ -468,6 +512,16 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
                 3 * 60 * 60,
                 source="site_rule",
                 source_note="本站按 Plus 调度基线的 5 倍计算。",
+            ),
+            "image:create": _rule(
+                True,
+                200,
+                3 * 60 * 60,
+                source="site_rule",
+                source_note=(
+                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
+                    "按本站 Plus 图片基线的 5 倍计算。"
+                ),
             ),
             "gpt-5-3:standard": _rule(
                 True,
@@ -520,6 +574,16 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
                 3 * 60 * 60,
                 source="site_rule",
                 source_note="本站按 Plus 调度基线的 20 倍计算。",
+            ),
+            "image:create": _rule(
+                True,
+                800,
+                3 * 60 * 60,
+                source="site_rule",
+                source_note=(
+                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
+                    "按本站 Plus 图片基线的 20 倍计算。"
+                ),
             ),
             "gpt-5-3:standard": _rule(
                 True,
@@ -2769,6 +2833,43 @@ class ChatStore:
             key: value
             for key, value in policy.items()
             if key != "rules"
+        }
+
+    def image_routing_for_user(self, user_id: str, role: str) -> dict[str, Any]:
+        """Resolve the independent image lane and its allowed account tiers.
+
+        Custom and legacy GPT groups default to Plus-class image workers. That
+        conservative default prevents an ordinary group from silently spilling
+        into a 20× Pro account. The immutable plan groups retain their explicit
+        tier; the currently deployed 5× product may use either a future 5×
+        worker or a 20× worker while still receiving only its 5× user budget.
+        """
+
+        with self._guard(), self._connect() as connection:
+            policy = self._resolved_policy(connection, user_id, role)
+        group = dict(policy["provider_groups"]["gpt"])
+        group_id = str(group.get("id") or "")
+        preset = PLAN_GROUP_PRESET_BY_ID.get(group_id)
+        plan = (
+            str(preset[1])
+            if preset is not None and preset[0] == "gpt"
+            else ("pro-20x" if role == "admin" else "plus")
+        )
+        required_profiles = {
+            "free": ("free",),
+            "go": ("go", "plus"),
+            "plus": ("plus",),
+            "pro-5x": ("pro-5x", "pro-20x"),
+            "pro-20x": ("pro-20x",),
+        }[plan]
+        return {
+            "selection_key": "image:create",
+            "plan": plan,
+            "account_pool_id": str(
+                group.get("account_pool_id") or "gpt-default"
+            ),
+            "required_quota_profiles": list(required_profiles),
+            "model_group_id": group_id or None,
         }
 
     def concurrency_for_user(self, user_id: str, role: str) -> dict[str, Any]:

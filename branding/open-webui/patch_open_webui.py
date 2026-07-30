@@ -2359,6 +2359,11 @@ replace_once(
     """from open_webui.constants import ERROR_MESSAGES
 from open_webui.turtle_storage.media import persist_generated_media_url
 from open_webui.turtle_storage.pump import strict_media_mode
+from open_webui.turtle_chat.metering import (
+    finalize_image_generation,
+    prepare_image_generation,
+    release_image_generation,
+)
 """,
 )
 replace_once(
@@ -2373,7 +2378,52 @@ replace_once(
             if strict_media_mode():
                 data['response_format'] = 'url'
 
+            turtle_image_context = await prepare_image_generation(
+                user,
+                chat_id=metadata.get('chat_id'),
+            )
+            upstream_data = {
+                **data,
+                **turtle_image_context.routing_payload(),
+                'turtle_user_id': str(user.id),
+            }
             session = await get_session()
+""",
+)
+replace_once(
+    images_router_path,
+    """            async with session.post(
+                url=url,
+                json=data,
+                headers=headers,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            ) as r:
+                r.raise_for_status()
+                res = await r.json(content_type=None)
+
+            images = []
+""",
+    """            try:
+                async with session.post(
+                    url=url,
+                    json=upstream_data,
+                    headers=headers,
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                ) as r:
+                    r.raise_for_status()
+                    res = await r.json(content_type=None)
+                generated = res.get('data') if isinstance(res, dict) else None
+                if not isinstance(generated, list):
+                    generated = []
+                await finalize_image_generation(
+                    turtle_image_context,
+                    bool(generated),
+                )
+            except BaseException:
+                await release_image_generation(turtle_image_context)
+                raise
+
+            images = []
 """,
 )
 replace_once(
