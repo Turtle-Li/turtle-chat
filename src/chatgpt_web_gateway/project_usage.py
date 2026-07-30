@@ -758,17 +758,52 @@ class MemoryProjectUsageStore:
 
 
 class PostgresProjectUsageStore:
-    def __init__(self, database_url: str, master_key: str):
+    def __init__(
+        self,
+        database_url: str,
+        master_key: str,
+        *,
+        connection_pool: Any | None = None,
+    ):
         self.database_url = database_url
         self.master_key = master_key
+        self._owns_connection_pool = connection_pool is None
+        if connection_pool is not None:
+            self._connection_pool = connection_pool
+            return
+        try:
+            from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
+        except ImportError as exc:  # pragma: no cover - production dependency gate
+            raise RuntimeError(
+                "psycopg and psycopg_pool are required for project API usage"
+            ) from exc
+
+        # A Project API completion performs authentication, credit reservation,
+        # and final settlement as separate short transactions. Reopening a
+        # PostgreSQL connection for every transaction adds fixed latency before
+        # the upstream request and just before [DONE]. Keep a bounded pool; key
+        # status and permissions are still read from PostgreSQL on every call,
+        # so revocation remains immediate.
+        self._connection_pool = ConnectionPool(
+            conninfo=self.database_url,
+            kwargs={"row_factory": dict_row},
+            min_size=2,
+            max_size=16,
+            timeout=5.0,
+            max_idle=300.0,
+            max_lifetime=1800.0,
+            check=ConnectionPool.check_connection,
+            name="turtle-project-usage",
+            open=True,
+        )
 
     def _connect(self):
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except ImportError as exc:  # pragma: no cover - production dependency gate
-            raise RuntimeError("psycopg is required for project API usage") from exc
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+        return self._connection_pool.connection()
+
+    def close(self) -> None:
+        if self._owns_connection_pool:
+            self._connection_pool.close(timeout=5.0)
 
     def initialize(self) -> None:
         statements = (
@@ -1332,20 +1367,15 @@ class PostgresProjectUsageStore:
                 reserved = (
                     official * multiplier_ppm + COST_MULTIPLIER_SCALE - 1
                 ) // COST_MULTIPLIER_SCALE
-                cursor.execute(
-                    """
-                    SELECT balance_microusd, reserved_microusd
-                    FROM chat_project_api_user
-                    WHERE user_id = %s
-                    """,
-                    (owner["owner_user_id"],),
+                balance = owner["balance_microusd"]
+                current_reserved = max(
+                    0,
+                    int(owner["reserved_microusd"]) - expired_amount,
                 )
-                balance_row = cursor.fetchone()
-                balance = balance_row["balance_microusd"]
                 available = (
                     None
                     if balance is None
-                    else int(balance) - int(balance_row["reserved_microusd"])
+                    else int(balance) - current_reserved
                 )
                 if available is not None and available < reserved:
                     raise ProjectBalanceInsufficient(
@@ -2009,6 +2039,11 @@ class ProjectUsageManager:
     async def start(self) -> None:
         await asyncio.to_thread(self.store.initialize)
 
+    async def close(self) -> None:
+        close_store = getattr(self.store, "close", None)
+        if callable(close_store):
+            await asyncio.to_thread(close_store)
+
     async def pricing_config(self) -> dict[str, Any]:
         return await asyncio.to_thread(self.store.pricing_config)
 
@@ -2136,11 +2171,18 @@ class ProjectUsageManager:
 
 
 def build_project_usage(
-    *, database_url: str | None, master_key: str
+    *,
+    database_url: str | None,
+    master_key: str,
+    connection_pool: Any | None = None,
 ) -> ProjectUsageManager:
     store: MemoryProjectUsageStore | PostgresProjectUsageStore
     if database_url:
-        store = PostgresProjectUsageStore(database_url, master_key)
+        store = PostgresProjectUsageStore(
+            database_url,
+            master_key,
+            connection_pool=connection_pool,
+        )
     else:
         store = MemoryProjectUsageStore(master_key)
     return ProjectUsageManager(store)

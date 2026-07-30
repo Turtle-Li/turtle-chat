@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from chatgpt_web_gateway.app import (
     _claude_request_payload,
     _derive_upstream_conversation_key,
+    _has_unsealed_image_url,
     _image_url_count,
     _message_shape,
     _payload_has_explicit_web_search,
@@ -818,6 +819,41 @@ def test_image_url_count_reports_only_structured_media() -> None:
             ]
         }
     ) == (2, "user", True)
+
+
+def test_unsealed_image_url_detection_requires_a_managed_source_token() -> None:
+    source_token = f"{'a' * 20}.{'b' * 43}"
+    assert _has_unsealed_image_url(
+        {
+            "messages": [
+                {
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.test/a.png"},
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+    assert not _has_unsealed_image_url(
+        {
+            "messages": [
+                {
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.test/a.png",
+                                "turtle_source": source_token,
+                            },
+                        }
+                    ]
+                }
+            ]
+        }
+    )
 
 
 def test_models_expose_family_version_and_thinking_controls() -> None:
@@ -2685,6 +2721,62 @@ def test_malformed_managed_source_token_is_rejected_before_upstream() -> None:
         )
     assert response.status_code == 400
     assert "source token is invalid" in response.json()["error"]["message"]
+
+
+def test_project_key_rejects_an_unmanaged_image_before_upstream() -> None:
+    upstream_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal upstream_calls
+        upstream_calls += 1
+        return httpx.Response(500)
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        client.put(
+            "/internal/project-api/permissions/user-a",
+            headers=headers(),
+            json={"enabled": True, "updated_by": "admin-1"},
+        )
+        grant_project_credit(client, "user-a")
+        created = client.post(
+            "/internal/project-api/keys",
+            headers=headers(),
+            json={"owner_user_id": "user-a", "name": "图片项目"},
+        ).json()
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {created['api_key']}",
+                "Idempotency-Key": "project-unmanaged-image-0001",
+            },
+            json={
+                "model": "gpt-5-web",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://example.test/image.png"
+                                },
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "托管媒体来源" in response.json()["error"]["message"]
+    assert upstream_calls == 0
 
 
 def test_secret_redaction() -> None:

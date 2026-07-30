@@ -1544,6 +1544,11 @@ class PostgresAccountStore:
     def _connect(self):
         return self._connection_pool.connection()
 
+    @property
+    def connection_pool(self) -> Any:
+        """Expose the Gateway-owned pool to short same-database stores."""
+        return self._connection_pool
+
     def close(self) -> None:
         self._connection_pool.close(timeout=5.0)
 

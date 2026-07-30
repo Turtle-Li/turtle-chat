@@ -38,18 +38,45 @@ class PostgresUpstreamCleanupStore:
         *,
         ttl_seconds: int,
         conversation_action: str,
+        connection_pool: Any | None = None,
     ) -> None:
         self.database_url = database_url
         self.ttl_seconds = int(ttl_seconds)
         self.conversation_action = str(conversation_action)
+        self._owns_connection_pool = connection_pool is None
+        if connection_pool is not None:
+            self._connection_pool = connection_pool
+            return
+        try:
+            from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
+        except ImportError as exc:  # pragma: no cover - production dependency
+            raise RuntimeError(
+                "psycopg and psycopg_pool are required for upstream cleanup"
+            ) from exc
+
+        # Successful streams record only opaque upstream resource identifiers,
+        # but that write happens before [DONE]. Reopening PostgreSQL for every
+        # response adds avoidable tail latency, so reuse a small bounded pool.
+        self._connection_pool = ConnectionPool(
+            conninfo=self.database_url,
+            kwargs={"row_factory": dict_row},
+            min_size=1,
+            max_size=16,
+            timeout=5.0,
+            max_idle=300.0,
+            max_lifetime=1800.0,
+            check=ConnectionPool.check_connection,
+            name="turtle-upstream-cleanup",
+            open=True,
+        )
 
     def _connect(self):
-        try:
-            import psycopg
-            from psycopg.rows import dict_row
-        except ImportError as exc:  # pragma: no cover - production dependency
-            raise RuntimeError("psycopg is required for upstream cleanup") from exc
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+        return self._connection_pool.connection()
+
+    def close(self) -> None:
+        if self._owns_connection_pool:
+            self._connection_pool.close(timeout=5.0)
 
     def initialize(self) -> None:
         statements = (
@@ -533,6 +560,7 @@ class UpstreamCleanupManager:
         conversation_action: str,
         interval_seconds: int,
         batch_size: int,
+        connection_pool: Any | None = None,
     ) -> None:
         self.enabled = bool(enabled and database_url)
         self.execute = bool(execute and self.enabled)
@@ -546,6 +574,7 @@ class UpstreamCleanupManager:
                 str(database_url),
                 ttl_seconds=ttl_seconds,
                 conversation_action=conversation_action,
+                connection_pool=connection_pool,
             )
             if self.enabled and database_url
             else None
@@ -570,6 +599,8 @@ class UpstreamCleanupManager:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+        if self.store is not None:
+            await asyncio.to_thread(self.store.close)
 
     async def record(
         self,

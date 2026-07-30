@@ -143,6 +143,21 @@ def _image_url_count(payload: dict[str, Any]) -> int:
     )
 
 
+def _has_unsealed_image_url(payload: dict[str, Any]) -> bool:
+    return any(
+        not isinstance(part.get("image_url"), dict)
+        or not part["image_url"].get("turtle_source")
+        for message in payload.get("messages", [])
+        if isinstance(message, dict)
+        for part in (
+            message.get("content")
+            if isinstance(message.get("content"), list)
+            else []
+        )
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    )
+
+
 def _message_shape(payload: dict[str, Any]) -> tuple[int, str, bool]:
     messages = payload.get("messages", [])
     if not isinstance(messages, list) or not messages:
@@ -602,6 +617,11 @@ def create_app(
             secret_path=resolved.login_control_secret_file,
             transport=login_control_transport,
         )
+        shared_database_pool = getattr(
+            application.state.account_pool.store,
+            "connection_pool",
+            None,
+        )
         application.state.upstream_cleanup = UpstreamCleanupManager(
             database_url=resolved.account_pool_database_url,
             account_pool=application.state.account_pool,
@@ -613,10 +633,12 @@ def create_app(
             ),
             interval_seconds=resolved.upstream_cleanup_interval_seconds,
             batch_size=resolved.upstream_cleanup_batch_size,
+            connection_pool=shared_database_pool,
         )
         application.state.project_usage = build_project_usage(
             database_url=resolved.account_pool_database_url,
             master_key=resolved.gateway_api_key,
+            connection_pool=shared_database_pool,
         )
         await application.state.account_pool.start()
         await application.state.project_usage.start()
@@ -626,6 +648,7 @@ def create_app(
         finally:
             await application.state.upstream_cleanup.close()
             await application.state.login_control.close()
+            await application.state.project_usage.close()
             await application.state.account_pool.close()
 
     application = FastAPI(title="ChatGPT Web Gateway PoC", version="0.1.0", lifespan=lifespan)
@@ -1711,6 +1734,26 @@ def create_app(
                 fallback_points=0,
             )
             return _error(400, str(exc), "invalid_request_error")
+        if (
+            not caller.is_master
+            and resolved.strict_external_media
+            and _has_unsealed_image_url(payload)
+        ):
+            await record_project_usage(
+                provider=provider,
+                route=selection_key,
+                outcome="error",
+                status_code=400,
+                fallback_points=0,
+            )
+            return _error(
+                400,
+                (
+                    "Project API 图片必须使用 Turtle 托管媒体来源；"
+                    "当前不支持任意公网 image_url 或内联文件"
+                ),
+                "invalid_request_error",
+            )
         authorization_error = await authorize_project_request(selection_key)
         if authorization_error is not None:
             return authorization_error

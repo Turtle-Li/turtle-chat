@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from open_webui.internal.db import get_async_session
 from open_webui.models.users import Users
 from open_webui.turtle_admin.router import _gateway_internal_url, _gateway_json
@@ -18,6 +18,36 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 proxy_router = APIRouter()
+_project_proxy_client: httpx.AsyncClient | None = None
+_project_proxy_client_lock = asyncio.Lock()
+
+
+async def _project_gateway_client() -> httpx.AsyncClient:
+    """Reuse internal Gateway connections across Project API requests."""
+    global _project_proxy_client
+    if _project_proxy_client is not None and not _project_proxy_client.is_closed:
+        return _project_proxy_client
+    async with _project_proxy_client_lock:
+        if _project_proxy_client is None or _project_proxy_client.is_closed:
+            _project_proxy_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(600.0, connect=5.0),
+                limits=httpx.Limits(
+                    max_connections=64,
+                    max_keepalive_connections=32,
+                    keepalive_expiry=30.0,
+                ),
+                trust_env=False,
+            )
+        return _project_proxy_client
+
+
+@proxy_router.on_event("shutdown")
+async def _close_project_gateway_client() -> None:
+    global _project_proxy_client
+    client = _project_proxy_client
+    _project_proxy_client = None
+    if client is not None and not client.is_closed:
+        await client.aclose()
 
 
 class ProjectKeyForm(BaseModel):
@@ -68,10 +98,7 @@ async def _project_gateway_proxy(request: Request, path: str) -> Response:
         headers["Content-Type"] = request.headers["content-type"]
     if request.headers.get("idempotency-key"):
         headers["Idempotency-Key"] = request.headers["idempotency-key"]
-    client = httpx.AsyncClient(
-        timeout=httpx.Timeout(600.0, connect=5.0),
-        trust_env=False,
-    )
+    client = await _project_gateway_client()
     try:
         upstream = await client.send(
             client.build_request(
@@ -83,13 +110,11 @@ async def _project_gateway_proxy(request: Request, path: str) -> Response:
             stream=True,
         )
     except httpx.TimeoutException as exc:
-        await client.aclose()
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail="项目 API 上游超时",
         ) from exc
     except httpx.HTTPError as exc:
-        await client.aclose()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="项目 API Gateway 暂时不可达",
@@ -113,7 +138,6 @@ async def _project_gateway_proxy(request: Request, path: str) -> Response:
                 yield chunk
         finally:
             await upstream.aclose()
-            await client.aclose()
 
     return StreamingResponse(
         relay(),
@@ -131,6 +155,23 @@ async def proxy_project_models(request: Request):
 @proxy_router.post("/chat/completions")
 async def proxy_project_chat_completions(request: Request):
     return await _project_gateway_proxy(request, "/v1/chat/completions")
+
+
+@proxy_router.api_route(
+    "/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def unsupported_project_api_endpoint(path: str):
+    return JSONResponse(
+        status_code=status.HTTP_404_NOT_FOUND,
+        content={
+            "error": {
+                "message": f"unsupported Project API endpoint: /{path}",
+                "type": "invalid_request_error",
+                "code": "unsupported_endpoint",
+            }
+        },
+    )
 
 
 def _query(path: str, **values) -> str:

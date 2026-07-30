@@ -6,6 +6,10 @@ import unittest
 import uuid
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from fastapi.testclient import TestClient
+
+from chatgpt_web_gateway.app import create_app
+from chatgpt_web_gateway.config import Settings
 from chatgpt_web_gateway.project_usage import PostgresProjectUsageStore
 
 
@@ -49,6 +53,7 @@ class PostgresProjectUsageStoreTests(unittest.TestCase):
         import psycopg
         from psycopg import sql
 
+        self.store.close()
         with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as connection:
             connection.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(
@@ -136,3 +141,27 @@ class PostgresProjectUsageStoreTests(unittest.TestCase):
             self.store.permission("user-a")["balance_microusd"],
             900_000,
         )
+
+    def test_gateway_shares_one_database_pool_across_short_stores(self) -> None:
+        database_url = _schema_url(TEST_DATABASE_URL, self.schema)
+        gateway_settings = Settings(
+            gateway_api_key="postgres-shared-pool-test",
+            backend="mock",
+            account_pool_enabled=True,
+            account_pool_database_url=database_url,
+            upstream_cleanup_enabled=True,
+            upstream_cleanup_execute=False,
+            upstream_cleanup_interval_seconds=3600,
+        )
+
+        with TestClient(create_app(gateway_settings)) as client:
+            state = client.app.state
+            shared_pool = state.account_pool.store.connection_pool
+            self.assertIs(
+                state.project_usage.store._connection_pool,
+                shared_pool,
+            )
+            self.assertIs(
+                state.upstream_cleanup.store._connection_pool,
+                shared_pool,
+            )
