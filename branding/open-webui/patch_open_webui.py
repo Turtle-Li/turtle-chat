@@ -1095,7 +1095,38 @@ replace_once(
             form_data, metadata, events = await process_chat_payload(request, form_data, user, metadata, model)
             turtle_latency_stage('payload_ready')
 
-            response = await chat_completion_handler(request, form_data, user)
+            direct_image_generation = bool(
+                form_data.pop('_turtle_direct_image_generation', False)
+            )
+            if direct_image_generation:
+                # The image handler already emitted and persisted the generated
+                # files. Completing locally avoids a redundant ordinary GPT
+                # request whose empty stream would overwrite a successful image
+                # turn with "上游返回空结果".
+                response = {
+                    'id': f"turtle-image-{metadata.get('message_id') or uuid4().hex}",
+                    'object': 'chat.completion',
+                    'created': int(time.time()),
+                    'model': form_data.get('model', model_id),
+                    'choices': [
+                        {
+                            'index': 0,
+                            'message': {
+                                'role': 'assistant',
+                                'content': '图片已生成。',
+                            },
+                            'finish_reason': 'stop',
+                        }
+                    ],
+                    'usage': {
+                        'prompt_tokens': 0,
+                        'completion_tokens': 0,
+                        'total_tokens': 0,
+                    },
+                }
+                log.info('turtle_image_generation_direct_completion=1')
+            else:
+                response = await chat_completion_handler(request, form_data, user)
             turtle_latency_stage('upstream_ready')
 """,
 )
@@ -2620,7 +2651,10 @@ replace_once(
     """                # The Turtle web-account route does not execute Open WebUI's native
                 # generate_image tool. In strict mode use the deterministic image
                 # endpoint so the external Pump, never the app host, moves bytes.
-                if strict_media_mode() or metadata.get('params', {}).get('function_calling') == 'legacy':
+                if strict_media_mode():
+                    form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
+                    form_data['_turtle_direct_image_generation'] = True
+                elif metadata.get('params', {}).get('function_calling') == 'legacy':
                     form_data = await chat_image_generation_handler(request, form_data, extra_params, user)
 """,
 )
@@ -2681,6 +2715,21 @@ replace_once(
                         'turtle_media': turtle_media,
                     }
                 ),
+""",
+)
+replace_once(
+    middleware_path,
+    """            system_message_content = f'<context>Image generation was attempted but failed because of an error. The system is currently unable to generate the image. Tell the user that the following error occurred: {error_message}</context>'
+""",
+    """            if strict_media_mode():
+                raise HTTPException(
+                    status_code=(
+                        e.status_code if isinstance(e, HTTPException) else 502
+                    ),
+                    detail=error_message or '图片生成失败，请稍后重试',
+                )
+
+            system_message_content = f'<context>Image generation was attempted but failed because of an error. The system is currently unable to generate the image. Tell the user that the following error occurred: {error_message}</context>'
 """,
 )
 replace_once(

@@ -98,6 +98,10 @@ def test_patcher_wires_policy_before_builtin_resolution() -> None:
     patcher = (OPEN_WEBUI_BRANDING / "patch_open_webui.py").read_text(encoding="utf-8")
     assert "explicit_image_generation_intent," in patcher
     assert "turtle_image_generation_auto_enabled=1" in patcher
+    assert "form_data['_turtle_direct_image_generation'] = True" in patcher
+    assert "form_data.pop('_turtle_direct_image_generation', False)" in patcher
+    assert "turtle_image_generation_direct_completion=1" in patcher
+    assert "detail=error_message or '图片生成失败，请稍后重试'" in patcher
     assert "builtin_tool_reasons_for_turn = builtin_tool_reasons(" in patcher
     assert "model_knowledge=get_attached_knowledge(model, metadata)" in patcher
     assert "turtle_builtin_tool_policy enabled=%s reasons=%s" in patcher
