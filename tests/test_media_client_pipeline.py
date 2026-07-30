@@ -68,6 +68,10 @@ def test_deferred_media_flush_covers_button_enter_cancel_and_duplicate_send() ->
     assert 'document.addEventListener("click", handleDeferredUploadRemoval, true);' in source
     assert "task.abortController.abort();" in source
     assert "cancelledUploadResponse()" in source
+    assert "待发送" not in source
+    assert "压缩中" not in source
+    assert "正在上传 ${count} 个附件" not in source
+    assert "turtle-deferred-upload-status" not in source
 
 
 def test_direct_cos_upload_retries_only_transient_failures_with_a_small_bound() -> None:

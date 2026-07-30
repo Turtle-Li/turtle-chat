@@ -610,12 +610,10 @@
     const wrapper = task.wrapper;
     if (!wrapper) return;
     wrapper.querySelector("[data-turtle-deferred-upload-preview]")?.remove();
-    wrapper.querySelector("[data-turtle-deferred-upload-badge]")?.remove();
     wrapper.classList.remove("turtle-deferred-upload-card", "turtle-deferred-upload-has-preview");
     delete wrapper.dataset.turtleDeferredUploadId;
     delete wrapper.dataset.turtleDeferredUploadState;
     wrapper.removeAttribute("data-turtle-deferred-upload");
-    if (wrapper.title === "已在浏览器中准备，发送消息时上传") wrapper.removeAttribute("title");
     task.wrapper = null;
   };
 
@@ -626,22 +624,6 @@
     wrapper.dataset.turtleDeferredUploadId = task.id;
     wrapper.dataset.turtleDeferredUploadState = task.state;
     wrapper.setAttribute("data-turtle-deferred-upload", "");
-    wrapper.title = "已在浏览器中准备，发送消息时上传";
-
-    let badge = wrapper.querySelector("[data-turtle-deferred-upload-badge]");
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.dataset.turtleDeferredUploadBadge = "";
-      badge.setAttribute("aria-live", "polite");
-      wrapper.append(badge);
-    }
-    badge.textContent = {
-      preparing: "压缩中",
-      prepared: "待发送",
-      uploading: "上传中",
-      settling: "确认中",
-      failed: "上传失败",
-    }[task.state] || "";
 
     if (
       task.state === "prepared"
@@ -751,30 +733,20 @@
     if (task) cancelDeferredUpload(task);
   };
 
-  const setDeferredUploadBusy = (busy, count = 0) => {
+  const setDeferredUploadBusy = (busy) => {
     const composer = document.querySelector("#message-input-container");
     const sendButton = document.querySelector("#send-message-button");
     if (composer) {
       composer.toggleAttribute("data-turtle-deferred-upload-busy", busy);
       composer.setAttribute("aria-busy", String(busy));
     }
-    let status = document.querySelector("#turtle-deferred-upload-status");
-    if (busy && composer) {
-      if (!status) {
-        status = document.createElement("div");
-        status.id = "turtle-deferred-upload-status";
-        status.setAttribute("role", "status");
-        status.setAttribute("aria-live", "polite");
-        composer.append(status);
-      }
-      status.textContent = `正在上传 ${count} 个附件…`;
+    if (busy) {
       if (sendButton) {
         sendButton.dataset.turtleDeferredUploadBusy = "true";
         sendButton.setAttribute("aria-busy", "true");
       }
       return;
     }
-    status?.remove();
     if (sendButton?.dataset.turtleDeferredUploadBusy === "true") {
       delete sendButton.dataset.turtleDeferredUploadBusy;
       sendButton.removeAttribute("aria-busy");
@@ -830,7 +802,7 @@
     if (!tasks.length) return true;
 
     deferredUploadFlush = (async () => {
-      setDeferredUploadBusy(true, tasks.length);
+      setDeferredUploadBusy(true);
       tasks.forEach((task) => task.release());
       const results = await Promise.allSettled(tasks.map((task) => task.done));
       const nativeSettled = await settleNativeUploadState(tasks);

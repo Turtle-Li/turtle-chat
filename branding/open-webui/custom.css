@@ -4250,45 +4250,6 @@ html.light #navbar-bg-gradient-to-b {
   object-fit: cover;
 }
 
-[data-turtle-deferred-upload-badge] {
-  position: absolute;
-  left: 0.32rem;
-  bottom: -0.38rem;
-  z-index: 3;
-  padding: 0.08rem 0.34rem;
-  border: 1px solid rgba(34, 211, 238, 0.32);
-  border-radius: 999px;
-  color: #b8f4fb;
-  background: rgba(8, 31, 42, 0.94);
-  font-size: 0.58rem;
-  font-weight: 720;
-  line-height: 1.15;
-  pointer-events: none;
-}
-
-.turtle-deferred-upload-card[data-turtle-deferred-upload-state="uploading"]
-  [data-turtle-deferred-upload-badge] {
-  border-color: rgba(45, 212, 191, 0.38);
-  color: #baf8ea;
-}
-
-#turtle-deferred-upload-status {
-  position: absolute;
-  right: 0.7rem;
-  top: -1.8rem;
-  z-index: 20;
-  padding: 0.28rem 0.58rem;
-  border: 1px solid rgba(34, 211, 238, 0.22);
-  border-radius: 999px;
-  color: #b8f4fb;
-  background: rgba(8, 31, 42, 0.92);
-  box-shadow: 0 8px 24px rgba(2, 10, 16, 0.2);
-  font-size: 0.68rem;
-  font-weight: 650;
-  line-height: 1.2;
-  pointer-events: none;
-}
-
 #send-message-button[data-turtle-deferred-upload-busy="true"] {
   position: relative;
   cursor: wait;
@@ -4313,13 +4274,6 @@ html.light #navbar-bg-gradient-to-b {
   to {
     transform: rotate(360deg);
   }
-}
-
-html.light [data-turtle-deferred-upload-badge],
-html.light #turtle-deferred-upload-status {
-  border-color: rgba(8, 145, 178, 0.22);
-  color: #0e7490;
-  background: rgba(255, 255, 255, 0.96);
 }
 
 #turtle-chat-home {
