@@ -413,6 +413,7 @@ def test_gpt4free_overlay_tracks_official_image_delta_and_conversation() -> None
     assert '+        options["turtle_usage"] = {' in overlay
     assert "+            async with provider_handler._image_task_lock():" in overlay
     assert "+            if conversation is None and turtle_conversation_key:" in overlay
+    assert '+                    debug.log("OpenaiChat: Turtle conversation cache hit")' in overlay
     assert (
         "+                cls._turtle_conversation_cache[turtle_conversation_key]"
         " = copy("
