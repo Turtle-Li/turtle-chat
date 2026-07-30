@@ -70,6 +70,8 @@
   const spaceAbortControllers = new Set();
   const THUMBNAIL_CONCURRENCY = 4;
   const MEDIA_URL_EXPIRY_SKEW_MS = 30_000;
+  const MANAGED_THUMBNAIL_TIMEOUT_MS = 12_000;
+  const MANAGED_PREVIEW_TIMEOUT_MS = 15_000;
   const managedThumbnailAttempts = new Map();
   const managedThumbnailQueue = [];
   let managedThumbnailActive = false;
@@ -1072,54 +1074,79 @@
   };
 
   const ensureStaticThumbnail = async (fileId) => {
-    const statusResponse = await apiFetch(`/thumbnails/${encodeURIComponent(fileId)}`);
-    if (!statusResponse.ok) return false;
-    const statusPayload = await statusResponse.json();
-    if (statusPayload.ready || !statusPayload.eligible) return true;
-
-    const sourceResponse = await apiFetch(
-      `/files/${encodeURIComponent(fileId)}/url?variant=original`,
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort("managed-thumbnail-timeout"),
+      MANAGED_THUMBNAIL_TIMEOUT_MS,
     );
-    if (!sourceResponse.ok) throw new Error(await errorMessage(sourceResponse, "无法读取缩略图来源"));
-    const source = await sourceResponse.json();
-    const imageResponse = await originalFetch(source.url, source.direct
-      ? { credentials: "omit", mode: "cors", cache: "no-store" }
-      : { headers: authHeaders(), credentials: "same-origin", cache: "no-store" });
-    if (!imageResponse.ok) throw new Error("原图读取失败，稍后会重试缩略图生成");
-    const imageBlob = await imageResponse.blob();
-    const prepared = await prepareImageAssets(imageBlob, DEFAULT_MEDIA);
-    if (!prepared.thumbnail) throw new Error("当前浏览器无法生成静态缩略图");
-
-    const thumbnail = prepared.thumbnail;
-    const presignResponse = await apiFetch("/thumbnails/presign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        file_id: fileId,
-        content_type: STATIC_THUMBNAIL.content_type,
-        size: thumbnail.blob.size,
-        width: thumbnail.width,
-        height: thumbnail.height,
-      }),
-    });
-    if (!presignResponse.ok) throw new Error(await errorMessage(presignResponse, "无法准备静态缩略图"));
-    const ticket = await presignResponse.json();
-    if (ticket.ready) return true;
-    if (!ticket.thumbnail_upload?.upload_url) throw new Error("静态缩略图上传地址缺失");
-
     try {
+      const statusResponse = await apiFetch(
+        `/thumbnails/${encodeURIComponent(fileId)}`,
+        { signal: controller.signal },
+      );
+      if (!statusResponse.ok) {
+        throw new Error(await errorMessage(statusResponse, "无法读取缩略图状态"));
+      }
+      const statusPayload = await statusResponse.json();
+      if (statusPayload.ready) return true;
+      if (!statusPayload.eligible) throw new Error("这张图片暂时不能生成缩略图");
+
+      const sourceResponse = await apiFetch(
+        `/files/${encodeURIComponent(fileId)}/url?variant=original`,
+        { signal: controller.signal },
+      );
+      if (!sourceResponse.ok) throw new Error(await errorMessage(sourceResponse, "无法读取缩略图来源"));
+      const source = await sourceResponse.json();
+      const imageResponse = await originalFetch(source.url, source.direct
+        ? {
+            credentials: "omit",
+            mode: "cors",
+            cache: "no-store",
+            signal: controller.signal,
+          }
+        : {
+            headers: authHeaders(),
+            credentials: "same-origin",
+            cache: "no-store",
+            signal: controller.signal,
+          });
+      if (!imageResponse.ok) throw new Error("原图读取失败，稍后会重试缩略图生成");
+      const imageBlob = await imageResponse.blob();
+      const prepared = await prepareImageAssets(imageBlob, DEFAULT_MEDIA);
+      if (!prepared.thumbnail) throw new Error("当前浏览器无法生成静态缩略图");
+
+      const thumbnail = prepared.thumbnail;
+      const presignResponse = await apiFetch("/thumbnails/presign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          file_id: fileId,
+          content_type: STATIC_THUMBNAIL.content_type,
+          size: thumbnail.blob.size,
+          width: thumbnail.width,
+          height: thumbnail.height,
+        }),
+        signal: controller.signal,
+      });
+      if (!presignResponse.ok) throw new Error(await errorMessage(presignResponse, "无法准备静态缩略图"));
+      const ticket = await presignResponse.json();
+      if (ticket.ready) return true;
+      if (!ticket.thumbnail_upload?.upload_url) throw new Error("静态缩略图上传地址缺失");
+
       const upload = await originalFetch(ticket.thumbnail_upload.upload_url, {
         method: "PUT",
         headers: ticket.thumbnail_upload.headers || { "Content-Type": STATIC_THUMBNAIL.content_type },
         body: thumbnail.blob,
         credentials: "omit",
         mode: "cors",
+        signal: controller.signal,
       });
       if (!upload.ok) throw new Error(`静态缩略图上传失败（HTTP ${upload.status}）`);
       const complete = await apiFetch("/thumbnails/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ file_id: fileId }),
+        signal: controller.signal,
       });
       if (!complete.ok) throw new Error(await errorMessage(complete, "静态缩略图校验失败"));
       mediaUrlCache.delete(`${fileId}:thumbnail`);
@@ -1128,7 +1155,20 @@
     } catch (error) {
       await cancelStaticThumbnail(fileId);
       throw error;
+    } finally {
+      window.clearTimeout(timeout);
     }
+  };
+
+  const markManagedThumbnailFailure = (fileId) => {
+    document.querySelectorAll(".turtle-generated-gallery").forEach((gallery) => {
+      if (gallery.dataset.activeFileId !== fileId) return;
+      const image = gallery.querySelector("[data-gallery-main-image]");
+      if (image?.complete && image.naturalWidth > 0) return;
+      gallery.dataset.imageState = "error";
+      const copy = gallery.querySelector("[data-gallery-status-copy]");
+      if (copy) copy.textContent = "缩略图暂不可用，点按可打开原图";
+    });
   };
 
   const drainManagedThumbnailQueue = () => {
@@ -1142,7 +1182,7 @@
           refreshManagedThumbnailImages(fileId);
         }
       })
-      .catch(() => {})
+      .catch(() => markManagedThumbnailFailure(fileId))
       .finally(() => {
         managedThumbnailActive = false;
         drainManagedThumbnailQueue();
@@ -1447,8 +1487,16 @@
     const entry = entries[resolvedIndex];
     if (!entry) return;
     gallery.dataset.activeFileId = entry.fileId;
-    gallery.querySelector("[data-gallery-main-image]").src = entry.source;
-    gallery.querySelector("[data-gallery-main-image]").alt = entry.alt;
+    const mainImage = gallery.querySelector("[data-gallery-main-image]");
+    const alreadyLoaded =
+      mainImage.getAttribute("src") === entry.source
+      && mainImage.complete
+      && mainImage.naturalWidth > 0;
+    gallery.dataset.imageState = alreadyLoaded ? "ready" : "loading";
+    const statusCopy = gallery.querySelector("[data-gallery-status-copy]");
+    if (statusCopy) statusCopy.textContent = "正在准备图片预览…";
+    mainImage.src = entry.source;
+    mainImage.alt = entry.alt;
     gallery.querySelector("[data-gallery-preview]").setAttribute(
       "aria-label",
       `预览第 ${resolvedIndex + 1} 张图片`,
@@ -1477,9 +1525,15 @@
       button.setAttribute("role", "tab");
       button.setAttribute("aria-label", `查看第 ${index + 1} 张图片`);
       const image = document.createElement("img");
-      image.src = entry.source;
       image.alt = "";
       image.loading = "lazy";
+      image.addEventListener("load", () => {
+        button.dataset.imageState = "ready";
+      });
+      image.addEventListener("error", () => {
+        button.dataset.imageState = "error";
+      });
+      image.src = entry.source;
       button.append(image);
       rail.append(button);
     });
@@ -1508,6 +1562,10 @@
       <div class="turtle-generated-gallery-stage">
         <button type="button" class="turtle-generated-gallery-main" data-gallery-preview>
           <img data-gallery-main-image alt="" />
+          <span class="turtle-generated-gallery-status" data-gallery-status role="status">
+            <i aria-hidden="true"></i>
+            <strong data-gallery-status-copy>正在准备图片预览…</strong>
+          </span>
         </button>
         <div class="turtle-generated-gallery-overlay">
           <button type="button" data-gallery-edit>${generatedGalleryIcon("edit")}<span>编辑</span></button>
@@ -1536,6 +1594,23 @@
     source.classList.add("turtle-generated-gallery-source");
     source.setAttribute("aria-hidden", "true");
 
+    const mainImage = gallery.querySelector("[data-gallery-main-image]");
+    mainImage.addEventListener("load", () => {
+      if (
+        managedFileId(mainImage.getAttribute("src") || mainImage.src)
+        !== gallery.dataset.activeFileId
+      ) return;
+      gallery.dataset.imageState = "ready";
+    });
+    mainImage.addEventListener("error", () => {
+      const fileId = gallery.dataset.activeFileId;
+      if (!fileId) return;
+      gallery.dataset.imageState = "loading";
+      const statusCopy = gallery.querySelector("[data-gallery-status-copy]");
+      if (statusCopy) statusCopy.textContent = "正在准备图片预览…";
+      enqueueManagedThumbnail(fileId);
+    });
+
     gallery.addEventListener("click", (event) => {
       const thumbnail = event.target.closest("[data-gallery-index]");
       if (thumbnail) {
@@ -1550,8 +1625,16 @@
       const entry = entriesNow[activeIndex];
       if (!entry) return;
       if (event.target.closest("[data-gallery-preview]")) {
-        if (entry.trigger?.isConnected) entry.trigger.click();
-        else toast("图片预览暂时不可用，请刷新后重试", "error");
+        void openFilePreview(
+          {
+            id: entry.fileId,
+            kind: "image",
+            name: entry.alt || "生成图片",
+            size: null,
+            created_at: null,
+          },
+          null,
+        );
         return;
       }
       const editButton = event.target.closest("[data-gallery-edit]");
@@ -3415,12 +3498,16 @@
   };
 
   const openFilePreview = async (file, session) => {
-    if (session !== spaceSession || !["image", "video"].includes(file.kind)) return;
+    if ((session && session !== spaceSession) || !["image", "video"].includes(file.kind)) return;
     closePreview();
+    const metadata = [
+      Number(file.size) > 0 ? bytes(file.size) : "",
+      Number(file.created_at) > 0 ? timeText(file.created_at) : "",
+    ].filter(Boolean).join(" · ");
     const preview = document.createElement("div");
     preview.id = "turtle-media-preview";
     preview.innerHTML = `<section role="dialog" aria-modal="true" aria-label="${escapeHtml(file.name)}">
-      <header><div><strong title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</strong><span>${bytes(file.size)} · ${escapeHtml(timeText(file.created_at))}</span></div>
+      <header><div><strong title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</strong>${metadata ? `<span>${escapeHtml(metadata)}</span>` : ""}</div>
       <div><button type="button" data-preview-download>下载原图</button><button type="button" data-preview-close aria-label="关闭预览">×</button></div></header>
       <div class="turtle-media-preview-body" data-preview-body><div class="turtle-preview-loading"><span class="turtle-preview-spinner"></span><strong>正在加载清晰预览…</strong></div></div>
     </section>`;
@@ -3440,20 +3527,29 @@
       window.removeEventListener("orientationchange", syncPreviewViewport);
     };
     const controller = trackedAbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort("managed-preview-timeout"),
+      MANAGED_PREVIEW_TIMEOUT_MS,
+    );
     preview._abortController = controller;
     preview.addEventListener("click", (event) => {
       if (event.target === preview || event.target.closest("[data-preview-close]")) closePreview();
       if (event.target.closest("[data-preview-download]")) void downloadFile(file.id);
+      if (event.target.closest("[data-preview-retry]")) void openFilePreview(file, session);
     });
     preview.querySelector("[data-preview-close]")?.focus();
     try {
       const variant = file.kind === "image" ? "preview" : "original";
       const source = await resolveMediaSource(file.id, variant, controller);
       const body = preview.querySelector("[data-preview-body]");
-      if (!body || !preview.isConnected || controller.signal.aborted || session !== spaceSession) return;
+      if (
+        !body
+        || !preview.isConnected
+        || controller.signal.aborted
+        || (session && session !== spaceSession)
+      ) return;
       body.innerHTML = "";
       const media = document.createElement(file.kind === "image" ? "img" : "video");
-      media.src = source;
       if (file.kind === "image") {
         media.alt = file.name;
         media.decoding = "async";
@@ -3463,20 +3559,28 @@
         media.preload = "metadata";
         media.playsInline = true;
       }
-      media.addEventListener(
-        "error",
-        () => {
-          if (body.isConnected) body.innerHTML = '<strong class="turtle-preview-error">预览内容加载失败</strong>';
-        },
-        { once: true },
-      );
-      body.append(media);
+      await new Promise((resolve, reject) => {
+        const loadedEvent = file.kind === "image" ? "load" : "loadedmetadata";
+        media.addEventListener(loadedEvent, resolve, { once: true });
+        media.addEventListener("error", () => reject(new Error("预览内容加载失败")), { once: true });
+        controller.signal.addEventListener(
+          "abort",
+          () => reject(new DOMException("Preview timed out", "AbortError")),
+          { once: true },
+        );
+        media.src = source;
+        body.append(media);
+      });
     } catch (error) {
       const body = preview.querySelector("[data-preview-body]");
-      if (error?.name !== "AbortError" && body && preview.isConnected) {
-        body.innerHTML = `<strong class="turtle-preview-error">${escapeHtml(error?.message || "预览加载失败")}</strong>`;
+      if (body && preview.isConnected) {
+        const message = controller.signal.aborted
+          ? "清晰预览加载超时"
+          : error?.message || "预览加载失败";
+        body.innerHTML = `<div class="turtle-preview-error"><strong>${escapeHtml(message)}</strong><button type="button" data-preview-retry>重试</button></div>`;
       }
     } finally {
+      window.clearTimeout(timeout);
       releaseAbortController(controller);
     }
   };

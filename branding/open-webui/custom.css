@@ -87,6 +87,56 @@
   border-radius: inherit;
 }
 
+.turtle-generated-gallery-status {
+  position: absolute;
+  inset: 0;
+  display: none;
+  gap: 0.62rem;
+  align-items: center;
+  justify-content: center;
+  padding: 1.25rem;
+  color: #cbd5e1;
+  font: 620 0.76rem/1.45 var(--turtle-font);
+  text-align: center;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(34, 211, 238, 0.08), transparent 34%),
+    rgba(15, 35, 48, 0.96);
+  flex-direction: column;
+}
+
+.turtle-generated-gallery-status i {
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 2px solid rgba(148, 163, 184, 0.28);
+  border-top-color: var(--turtle-cyan);
+  border-radius: 999px;
+  animation: turtle-storage-spin 700ms linear infinite;
+}
+
+.turtle-generated-gallery[data-image-state="loading"] .turtle-generated-gallery-main img,
+.turtle-generated-gallery[data-image-state="error"] .turtle-generated-gallery-main img {
+  visibility: hidden;
+}
+
+.turtle-generated-gallery[data-image-state="loading"] .turtle-generated-gallery-status,
+.turtle-generated-gallery[data-image-state="error"] .turtle-generated-gallery-status {
+  display: flex;
+}
+
+.turtle-generated-gallery[data-image-state="error"] .turtle-generated-gallery-status i {
+  width: 1.55rem;
+  height: 1.55rem;
+  border: 1px solid rgba(148, 163, 184, 0.34);
+  animation: none;
+}
+
+.turtle-generated-gallery[data-image-state="error"] .turtle-generated-gallery-status i::after {
+  display: block;
+  color: #94a3b8;
+  font: 700 0.9rem/1.45 var(--turtle-font);
+  content: "!";
+}
+
 .turtle-generated-gallery-overlay {
   position: absolute;
   right: 0.58rem;
@@ -274,6 +324,21 @@
   height: 100%;
   margin: 0 !important;
   object-fit: cover;
+}
+
+.turtle-generated-gallery-rail button[data-image-state="error"] img {
+  visibility: hidden;
+}
+
+.turtle-generated-gallery-rail button[data-image-state="error"]::after {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  color: #94a3b8;
+  font: 700 0.82rem/1 var(--turtle-font);
+  content: "!";
+  background: rgba(15, 35, 48, 0.92);
+  place-items: center;
 }
 
 .turtle-generated-gallery footer {
@@ -2220,7 +2285,8 @@ html.light body {
   display: none !important;
 }
 
-#message-input-container button.turtle-stop-button {
+#message-input-container button.turtle-stop-button,
+#message-input-container button:has(> svg path[d^="M2.25 12c0-5.385"]) {
   position: relative;
   display: grid !important;
   box-sizing: border-box;
@@ -2238,11 +2304,13 @@ html.light body {
   place-items: center;
 }
 
-#message-input-container button.turtle-stop-button svg {
+#message-input-container button.turtle-stop-button svg,
+#message-input-container button:has(> svg path[d^="M2.25 12c0-5.385"]) > svg {
   visibility: hidden !important;
 }
 
-#message-input-container button.turtle-stop-button::after {
+#message-input-container button.turtle-stop-button::after,
+#message-input-container button:has(> svg path[d^="M2.25 12c0-5.385"])::after {
   position: absolute;
   top: 50%;
   left: 50%;
@@ -2254,7 +2322,8 @@ html.light body {
   transform: translate(-50%, -50%);
 }
 
-html.light #message-input-container button.turtle-stop-button {
+html.light #message-input-container button.turtle-stop-button,
+html.light #message-input-container button:has(> svg path[d^="M2.25 12c0-5.385"]) {
   color: #1f2937 !important;
   background: #fff !important;
   box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.08);
@@ -7063,8 +7132,12 @@ html.light .turtle-media-preview-body {
 }
 
 .turtle-preview-error {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
   color: #fda4af;
   font-size: 0.7rem;
+  flex-direction: column;
 }
 
 @media (max-width: 640px) {
