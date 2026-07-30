@@ -1,5 +1,5 @@
 diff --git a/g4f/Provider/needs_auth/OpenaiChat.py b/g4f/Provider/needs_auth/OpenaiChat.py
-index 36d75ec..16c84cb 100644
+index 36d75ec..1ad5709 100644
 --- a/g4f/Provider/needs_auth/OpenaiChat.py
 +++ b/g4f/Provider/needs_auth/OpenaiChat.py
 @@ -4,15 +4,24 @@ import asyncio
@@ -2300,7 +2300,7 @@ index 36d75ec..16c84cb 100644
 +                    turtle_conversation_key
 +                )
 +                if cached_conversation is not None:
-+                    debug.log("OpenaiChat: Turtle conversation cache hit")
++                    print("turtle_image_conversation_reused=1", flush=True)
 +                    conversation = copy(cached_conversation)
 +                    cls._turtle_conversation_cache.pop(
 +                        turtle_conversation_key,
