@@ -36,6 +36,7 @@ from g4f.Provider.openai.media_pump import (  # noqa: E402
     MediaPumpError,
     ModelMediaSource,
     _post_sync,
+    model_source_metadata,
     open_model_source,
     probe_media,
 )
@@ -48,13 +49,17 @@ def _b64url(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
-def sealed_image_url(*, expires_at: int | None = None) -> dict:
+def sealed_image_url(
+    *,
+    expires_at: int | None = None,
+    media: dict | None = None,
+) -> dict:
     primary = (
         "https://files.chat.totools.cn/"
         "turtle-gpt/files/users/user-a/image.png?sign=test"
     )
     payload = {
-        "v": 1,
+        "v": 2 if media else 1,
         "exp": expires_at or int(time.time()) + 600,
         "id": "a" * 64,
         "primary_url": primary,
@@ -62,6 +67,7 @@ def sealed_image_url(*, expires_at: int | None = None) -> dict:
             "https://bucket.cos.ap-shanghai.myqcloud.com/"
             "turtle-gpt/files/users/user-a/image.png?q-signature"
         ),
+        **({"media": media} if media else {}),
     }
     encoded = _b64url(
         json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -173,12 +179,29 @@ class ModelSourceEnvelopeTests(unittest.TestCase):
         self.environment.stop()
 
     def test_signed_source_round_trips_and_tampering_fails_closed(self):
-        image_url = sealed_image_url()
+        image_url = sealed_image_url(
+            media={
+                "size": 4,
+                "content_type": "image/png",
+                "width": 1,
+                "height": 1,
+            }
+        )
         source = open_model_source(image_url)
 
         self.assertEqual(source.media_id, "a" * 64)
         self.assertEqual(source.primary_url, image_url["url"])
         self.assertIn(".cos.ap-shanghai.myqcloud.com/", source.fallback_url)
+        self.assertEqual(
+            model_source_metadata(source),
+            {
+                "size": 4,
+                "content_type": "image/png",
+                "max_bytes": MODEL_INPUT_MAX_BYTES,
+                "width": 1,
+                "height": 1,
+            },
+        )
 
         tampered = dict(image_url)
         tampered["url"] = tampered["url"].replace("image.png", "other.png")
@@ -188,6 +211,24 @@ class ModelSourceEnvelopeTests(unittest.TestCase):
         expired = sealed_image_url(expires_at=int(time.time()) - 1)
         with self.assertRaises(MediaPumpError):
             open_model_source(expired)
+
+    def test_signed_v2_source_rejects_invalid_verified_metadata(self):
+        invalid_metadata = (
+            {"size": 0, "content_type": "image/png"},
+            {"size": MODEL_INPUT_MAX_BYTES + 1, "content_type": "image/png"},
+            {"size": 4, "content_type": "text/plain"},
+            {"size": 4, "content_type": "image/png", "width": 1},
+            {
+                "size": 4,
+                "content_type": "image/png",
+                "width": 1,
+                "height": 1,
+                "unexpected": True,
+            },
+        )
+        for media in invalid_metadata:
+            with self.subTest(media=media), self.assertRaises(MediaPumpError):
+                open_model_source(sealed_image_url(media=media))
 
     def test_merge_preserves_verified_source_metadata_for_last_user_branch(self):
         image_url = sealed_image_url()
@@ -366,6 +407,74 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.turtle_media_metrics["transfer_bytes"], 4)
         self.assertNotIn(PRIVATE_INPUT_FILE_CACHE_ATTR, conversation.get_dict())
 
+    async def test_verified_source_metadata_skips_probe_before_transfer(self):
+        source = open_model_source(
+            sealed_image_url(
+                media={
+                    "size": 4,
+                    "content_type": "image/png",
+                    "width": 1,
+                    "height": 1,
+                }
+            )
+        )
+        conversation = Conversation(user_id=None)
+        conversation.turtle_media_metrics = _new_media_metrics()
+        setattr(conversation, PRIVATE_INPUT_FILE_CACHE_ATTR, {})
+        session = FakeSession(
+            post_payloads=[
+                {
+                    "file_id": "file_metadata",
+                    "upload_url": "https://oaiusercontent.example/upload-target",
+                },
+                {"download_url": "https://oaiusercontent.example/download"},
+            ]
+        )
+        transfer = AsyncMock(
+            return_value={
+                "size": 4,
+                "source": "primary",
+                "cdn_cache": "miss",
+                "retry_count": 0,
+            }
+        )
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.probe_media",
+                new=AsyncMock(side_effect=AssertionError("probe must not run")),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=transfer,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            uploaded = await OpenaiChat.upload_files(
+                session,
+                self.auth,
+                [source],
+                conversation,
+            )
+
+        self.assertEqual(uploaded[0].get("file_id"), "file_metadata")
+        self.assertEqual(uploaded[0].get("width"), 1)
+        self.assertEqual(uploaded[0].get("height"), 1)
+        self.assertEqual(conversation.turtle_media_metrics["probe_count"], 0)
+        self.assertEqual(conversation.turtle_media_metrics["transfer_count"], 1)
+        self.assertEqual(
+            transfer.await_args.kwargs["expected_content_type"],
+            "image/png",
+        )
+        self.assertEqual(transfer.await_args.kwargs["expected_size"], 4)
+
     async def test_managed_uploads_use_bounded_concurrency_and_preserve_order(self):
         sources = [
             ModelMediaSource(
@@ -409,7 +518,7 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 state["active"] -= 1
 
-        probe = {
+        probe_result = {
             "size": 4,
             "content_type": "image/png",
             "max_bytes": 1024,
@@ -419,6 +528,16 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
             "cdn_cache": "hit",
             "retry_count": 0,
         }
+        probe_state = {"count": 0}
+        probes_started = asyncio.Event()
+
+        async def probe(_source):
+            probe_state["count"] += 1
+            if probe_state["count"] == 3:
+                probes_started.set()
+            await asyncio.wait_for(probes_started.wait(), timeout=1)
+            return probe_result
+
         with (
             patch.dict(
                 os.environ,
@@ -430,7 +549,7 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "g4f.Provider.needs_auth.OpenaiChat.probe_media",
-                new=AsyncMock(return_value=probe),
+                new=probe,
             ),
             patch(
                 "g4f.Provider.needs_auth.OpenaiChat.transfer_media",

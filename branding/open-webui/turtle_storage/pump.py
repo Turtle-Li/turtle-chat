@@ -21,6 +21,11 @@ SIGNATURE_HEADER = "X-Turtle-Pump-Signature"
 MODEL_SOURCE_CONTEXT = b"turtle-model-source-v1\0"
 MODEL_SOURCE_ID_CONTEXT = b"turtle-model-source-id-v1\0"
 MODEL_SOURCE_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+MODEL_INPUT_MAX_BYTES = 20 * 1024**2
+MODEL_MEDIA_TYPE_RE = re.compile(
+    r"^image/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}$"
+)
+MODEL_MEDIA_MAX_DIMENSION = 32_768
 
 
 class MediaPumpError(RuntimeError):
@@ -114,6 +119,10 @@ class MediaPumpClient:
         fallback_url: str | None,
         source_key: str,
         ttl_seconds: int,
+        expected_size: int | None = None,
+        expected_content_type: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> str:
         """Seal CDN/COS sources and a stable, opaque upstream reuse key."""
         if not self.configured():
@@ -129,6 +138,42 @@ class MediaPumpClient:
         ttl = int(ttl_seconds)
         if ttl < 60 or ttl > 900:
             raise MediaPumpError("model source TTL must be between 60 and 900 seconds")
+        media = None
+        if expected_size is not None or expected_content_type is not None:
+            if (
+                isinstance(expected_size, bool)
+                or not isinstance(expected_size, int)
+                or expected_size <= 0
+                or expected_size > MODEL_INPUT_MAX_BYTES
+            ):
+                raise MediaPumpError("model source size is invalid")
+            content_type = (
+                str(expected_content_type or "")
+                .split(";", 1)[0]
+                .strip()
+                .lower()
+            )
+            if not MODEL_MEDIA_TYPE_RE.fullmatch(content_type):
+                raise MediaPumpError("model source content type is invalid")
+            media = {
+                "size": expected_size,
+                "content_type": content_type,
+            }
+            if width is not None or height is not None:
+                if (
+                    isinstance(width, bool)
+                    or isinstance(height, bool)
+                    or not isinstance(width, int)
+                    or not isinstance(height, int)
+                    or width <= 0
+                    or height <= 0
+                    or width > MODEL_MEDIA_MAX_DIMENSION
+                    or height > MODEL_MEDIA_MAX_DIMENSION
+                ):
+                    raise MediaPumpError("model source dimensions are invalid")
+                media.update({"width": width, "height": height})
+        elif width is not None or height is not None:
+            raise MediaPumpError("model source dimensions require verified media metadata")
         source_id = hmac.new(
             self.secret.encode("utf-8"),
             MODEL_SOURCE_ID_CONTEXT + str(source_key).encode("utf-8"),
@@ -138,11 +183,12 @@ class MediaPumpClient:
             raise MediaPumpError("model source ID generation failed")
         payload = json.dumps(
             {
-                "v": 1,
+                "v": 2 if media else 1,
                 "exp": int(time.time()) + ttl,
                 "id": source_id,
                 "primary_url": primary,
                 **({"fallback_url": fallback} if fallback else {}),
+                **({"media": media} if media else {}),
             },
             ensure_ascii=False,
             separators=(",", ":"),

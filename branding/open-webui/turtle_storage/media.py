@@ -19,7 +19,14 @@ from sqlalchemy import select
 
 from .core import CONFIG_STORE, safe_filename
 from .provider import Storage
-from .pump import MEDIA_PUMP, MediaPumpError, strict_media_mode
+from .pump import (
+    MEDIA_PUMP,
+    MODEL_INPUT_MAX_BYTES,
+    MODEL_MEDIA_MAX_DIMENSION,
+    MODEL_MEDIA_TYPE_RE,
+    MediaPumpError,
+    strict_media_mode,
+)
 from .quota import (
     MediaTooLargeError,
     QuotaExceededError,
@@ -378,6 +385,38 @@ def get_presigned_model_image_source_for_file(file, user) -> dict | None:
         and primary_parsed.path == fallback_parsed.path
     ):
         fallback_url = None
+    media_metadata: dict[str, int | str] = {}
+    file_data = file.data if isinstance(getattr(file, "data", None), dict) else {}
+    if file_data.get("status") == "completed":
+        try:
+            verified_size = int(meta.get("size") or 0)
+        except (TypeError, ValueError):
+            verified_size = 0
+        verified_type = (
+            str(meta.get("content_type") or "")
+            .split(";", 1)[0]
+            .strip()
+            .lower()
+        )
+        if (
+            0 < verified_size <= MODEL_INPUT_MAX_BYTES
+            and MODEL_MEDIA_TYPE_RE.fullmatch(verified_type)
+        ):
+            media_metadata = {
+                "expected_size": verified_size,
+                "expected_content_type": verified_type,
+            }
+            nested_meta = meta.get("data") if isinstance(meta.get("data"), dict) else {}
+            try:
+                width = int(meta.get("width") or nested_meta.get("width") or 0)
+                height = int(meta.get("height") or nested_meta.get("height") or 0)
+            except (TypeError, ValueError):
+                width = height = 0
+            if (
+                0 < width <= MODEL_MEDIA_MAX_DIMENSION
+                and 0 < height <= MODEL_MEDIA_MAX_DIMENSION
+            ):
+                media_metadata.update({"width": width, "height": height})
     token = MEDIA_PUMP.seal_model_source(
         primary_url=primary_url,
         fallback_url=fallback_url,
@@ -387,6 +426,7 @@ def get_presigned_model_image_source_for_file(file, user) -> dict | None:
             Storage.download_url_ttl(file.path, attachment=False, use_cdn=False),
             900,
         ),
+        **media_metadata,
     )
     return {"url": primary_url, "turtle_source": token}
 

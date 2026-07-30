@@ -450,12 +450,20 @@ class MediaPumpClientTests(unittest.TestCase):
                 fallback_url="https://bucket.cos.ap-shanghai.myqcloud.com/turtle/files/users/u/a.png?q=one",
                 source_key="file-id\0s3://bucket/turtle/files/users/u/a.png",
                 ttl_seconds=600,
+                expected_size=1024,
+                expected_content_type="image/png",
+                width=32,
+                height=24,
             )
             second = client.seal_model_source(
                 primary_url="https://files.chat.totools.cn/turtle/files/users/u/a.png?sign=two",
                 fallback_url="https://bucket.cos.ap-shanghai.myqcloud.com/turtle/files/users/u/a.png?q=two",
                 source_key="file-id\0s3://bucket/turtle/files/users/u/a.png",
                 ttl_seconds=600,
+                expected_size=1024,
+                expected_content_type="image/png",
+                width=32,
+                height=24,
             )
 
         def payload(token):
@@ -466,9 +474,19 @@ class MediaPumpClientTests(unittest.TestCase):
 
         first_payload = payload(first)
         second_payload = payload(second)
+        self.assertEqual(first_payload["v"], 2)
         self.assertEqual(first_payload["exp"], 1_700_000_600)
         self.assertEqual(first_payload["id"], second_payload["id"])
         self.assertEqual(len(first_payload["id"]), 64)
+        self.assertEqual(
+            first_payload["media"],
+            {
+                "size": 1024,
+                "content_type": "image/png",
+                "width": 32,
+                "height": 24,
+            },
+        )
         self.assertNotIn("file-id", first)
         self.assertTrue(first_payload["primary_url"].startswith("https://files.chat.totools.cn/"))
         self.assertTrue(first_payload["fallback_url"].startswith("https://bucket.cos."))
@@ -480,6 +498,39 @@ class MediaPumpClientTests(unittest.TestCase):
                 source_key="file-id",
                 ttl_seconds=59,
             )
+
+    def test_model_source_envelope_rejects_unverified_or_partial_metadata(self):
+        client = MediaPumpClient()
+        client.base_url = "https://pump.example"
+        client.secret = "unit-test-pump-secret-that-is-at-least-thirty-two-characters"
+        common = {
+            "primary_url": "https://files.chat.totools.cn/turtle/files/users/u/a.png",
+            "fallback_url": None,
+            "source_key": "file-id",
+            "ttl_seconds": 600,
+        }
+
+        legacy = client.seal_model_source(**common)
+        encoded = legacy.split(".", 1)[0]
+        payload = json.loads(
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        )
+        self.assertEqual(payload["v"], 1)
+        self.assertNotIn("media", payload)
+
+        invalid_metadata = (
+            {"expected_size": 1024},
+            {"expected_size": 0, "expected_content_type": "image/png"},
+            {"expected_size": 1024, "expected_content_type": "text/plain"},
+            {
+                "expected_size": 1024,
+                "expected_content_type": "image/png",
+                "width": 32,
+            },
+        )
+        for metadata in invalid_metadata:
+            with self.subTest(metadata=metadata), self.assertRaises(MediaPumpError):
+                client.seal_model_source(**common, **metadata)
 
 
 class ModelImageSourceTests(unittest.IsolatedAsyncioTestCase):
@@ -527,7 +578,13 @@ class ModelImageSourceTests(unittest.IsolatedAsyncioTestCase):
             user_id="user-a",
             path="s3://bucket/turtle/files/users/user-a/image.png",
             filename="image.png",
-            meta={"name": "image.png", "size": 1024},
+            data={"status": "completed"},
+            meta={
+                "name": "image.png",
+                "size": 1024,
+                "content_type": "image/png",
+                "data": {"width": 32, "height": 24},
+            },
         )
         user = SimpleNamespace(id="user-a", role="user")
         calls = []
@@ -567,7 +624,58 @@ class ModelImageSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["url"].startswith("https://files.chat.totools.cn/"))
         self.assertEqual(result["turtle_source"], "signed-source-token")
         self.assertEqual(seal.call_args.kwargs["ttl_seconds"], 600)
+        self.assertEqual(seal.call_args.kwargs["expected_size"], 1024)
+        self.assertEqual(
+            seal.call_args.kwargs["expected_content_type"],
+            "image/png",
+        )
+        self.assertEqual(seal.call_args.kwargs["width"], 32)
+        self.assertEqual(seal.call_args.kwargs["height"], 24)
         self.assertIn(file_id, seal.call_args.kwargs["source_key"])
+
+    async def test_unverified_file_keeps_the_legacy_probe_envelope(self):
+        file_id = "33333333-3333-3333-3333-333333333333"
+        file_item = SimpleNamespace(
+            id=file_id,
+            user_id="user-a",
+            path="s3://bucket/turtle/files/users/user-a/image.png",
+            filename="image.png",
+            data={"status": "reserved"},
+            meta={
+                "name": "image.png",
+                "size": 1024,
+                "content_type": "image/png",
+            },
+        )
+        with (
+            patch(
+                "open_webui.turtle_storage.media.Files.get_file_by_id",
+                new=AsyncMock(return_value=file_item),
+            ),
+            patch(
+                "open_webui.turtle_storage.media.Storage.presign_download",
+                side_effect=[
+                    "https://files.chat.totools.cn/turtle/files/users/user-a/image.png?sign=test",
+                    "https://bucket.cos.ap-shanghai.myqcloud.com/turtle/files/users/user-a/image.png?q=test",
+                ],
+            ),
+            patch(
+                "open_webui.turtle_storage.media.Storage.download_url_ttl",
+                return_value=600,
+            ),
+            patch(
+                "open_webui.turtle_storage.media.MEDIA_PUMP.seal_model_source",
+                return_value="legacy-source-token",
+            ) as seal,
+        ):
+            result = await get_presigned_model_image_source(
+                f"/api/v1/files/{file_id}/content",
+                SimpleNamespace(id="user-a", role="user"),
+            )
+
+        self.assertEqual(result["turtle_source"], "legacy-source-token")
+        self.assertNotIn("expected_size", seal.call_args.kwargs)
+        self.assertNotIn("expected_content_type", seal.call_args.kwargs)
 
     async def test_foreign_file_never_gets_model_source_urls(self):
         file_id = "22222222-2222-2222-2222-222222222222"
