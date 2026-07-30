@@ -1851,7 +1851,7 @@ class ChatStoreTests(unittest.TestCase):
                 pro_5x["image:create"]["limit_count"],
                 pro_20x["image:create"]["limit_count"],
             ),
-            (2, 10, 40, 200, 800),
+            (10, 20, 100, 500, 1000),
         )
         self.assertTrue(
             all(
@@ -1913,7 +1913,7 @@ class ChatStoreTests(unittest.TestCase):
             self.assertEqual(groups[group_id]["account_pool_id"], "gpt-default")
             self.assertTrue(groups[group_id]["is_plan_template"])
 
-    def test_image_routing_is_plan_strict_and_separate_from_text(self):
+    def test_image_routing_can_overflow_upward_but_keeps_user_budget(self):
         self.store.assign_model_group(
             "plus-user",
             "gpt",
@@ -1921,7 +1921,10 @@ class ChatStoreTests(unittest.TestCase):
             assigned_by="admin",
         )
         plus = self.store.image_routing_for_user("plus-user", "user")
-        self.assertEqual(plus["required_quota_profiles"], ["plus"])
+        self.assertEqual(
+            plus["required_quota_profiles"],
+            ["plus", "pro-5x", "pro-20x"],
+        )
 
         self.store.assign_model_group(
             "pro-user",
@@ -1943,9 +1946,13 @@ class ChatStoreTests(unittest.TestCase):
             level="create",
         )
         self.assertEqual(reservation.selection_key, "image:create")
-        self.store.finalize(reservation.id, "committed")
+        self.store.finalize(
+            reservation.id,
+            "committed",
+            usage_units=7,
+        )
         summary = self.store.quota_summary("plus-user", "user")["models"]
-        self.assertEqual(summary["image:create"]["remaining_count"], 39)
+        self.assertEqual(summary["image:create"]["remaining_count"], 93)
         self.assertEqual(
             summary["gpt-5-5:instant"]["remaining_count"],
             160,
@@ -2876,7 +2883,7 @@ class MeteringTests(unittest.IsolatedAsyncioTestCase):
         self.concurrency_patcher.stop()
         self.environment.stop()
 
-    async def test_one_official_image_task_uses_one_independent_reservation(self):
+    async def test_image_task_commits_official_allowance_delta(self):
         with tempfile.TemporaryDirectory() as temp:
             from . import metering
 
@@ -2896,13 +2903,17 @@ class MeteringTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(
                     context.required_quota_profiles,
-                    ["plus"],
+                    ["plus", "pro-5x", "pro-20x"],
                 )
                 self.assertEqual(
                     context.routing_payload()["turtle_chat_id"],
                     "chat-sticky",
                 )
-                await metering.finalize_image_generation(context, True)
+                await metering.finalize_image_generation(
+                    context,
+                    True,
+                    usage_units=7,
+                )
                 recent = store.recent_usage("image-user")
                 self.assertEqual(
                     [item["status"] for item in recent],
@@ -2911,7 +2922,7 @@ class MeteringTests(unittest.IsolatedAsyncioTestCase):
                 summary = store.quota_summary("image-user", "user")["models"]
                 self.assertEqual(
                     summary["image:create"]["remaining_count"],
-                    39,
+                    93,
                 )
                 self.assertEqual(
                     summary["gpt-5-5:instant"]["remaining_count"],

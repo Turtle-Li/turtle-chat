@@ -396,9 +396,28 @@ def test_gpt4free_overlay_retries_only_pre_message_403_requests() -> None:
         in overlay
     )
     assert "+                if response.status == 403 and attempt < 4:" in overlay
-    assert overlay.count("_safe_request_json(") == 4
+    assert overlay.count("_safe_request_json(") == 5
     assert "+                    proof_token = auth_result.proof_token = get_config(user_agent)" in overlay
     assert "+                        json_data={\"p\": get_requirements_token(proof_token)}," in overlay
+
+
+def test_gpt4free_overlay_tracks_official_image_delta_and_conversation() -> None:
+    overlay = (
+        LAUNCHER_PATH.parents[1]
+        / "patches/gpt4free-openaiaccount-gpt56.patch"
+    ).read_text(encoding="utf-8")
+
+    assert '+                    "system_hints": ["picture_v2"],' in overlay
+    assert 'and item.get("feature_name") == "image_gen"' in overlay
+    assert '+                usage_source = "official_remaining_delta"' in overlay
+    assert '+        options["turtle_usage"] = {' in overlay
+    assert "+            async with provider_handler._image_task_lock():" in overlay
+    assert "+            if conversation is None and turtle_conversation_key:" in overlay
+    assert (
+        "+                cls._turtle_conversation_cache[turtle_conversation_key]"
+        " = copy("
+        in overlay
+    )
 
 
 def test_gpt4free_overlay_runs_independent_preflight_requests_in_parallel() -> None:

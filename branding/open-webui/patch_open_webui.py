@@ -2410,14 +2410,46 @@ replace_once(
                     headers=headers,
                     ssl=AIOHTTP_CLIENT_SESSION_SSL,
                 ) as r:
-                    r.raise_for_status()
                     res = await r.json(content_type=None)
+                    if r.status >= 400:
+                        raw_usage = (
+                            res.get('turtle_usage')
+                            if isinstance(res, dict)
+                            else None
+                        )
+                        try:
+                            consumed_units = int(
+                                raw_usage.get('image_units')
+                                if isinstance(raw_usage, dict)
+                                else 0
+                            )
+                        except (TypeError, ValueError):
+                            consumed_units = 0
+                        if 1 <= consumed_units <= 1000:
+                            await finalize_image_generation(
+                                turtle_image_context,
+                                True,
+                                usage_units=consumed_units,
+                            )
+                        r.raise_for_status()
                 generated = res.get('data') if isinstance(res, dict) else None
                 if not isinstance(generated, list):
                     generated = []
+                raw_usage = res.get('turtle_usage') if isinstance(res, dict) else None
+                try:
+                    usage_units = int(
+                        raw_usage.get('image_units')
+                        if isinstance(raw_usage, dict)
+                        else len(generated)
+                    )
+                except (TypeError, ValueError):
+                    usage_units = len(generated)
+                if usage_units < 1 or usage_units > 1000:
+                    usage_units = max(1, len(generated))
                 await finalize_image_generation(
                     turtle_image_context,
                     bool(generated),
+                    usage_units=usage_units,
                 )
             except BaseException:
                 await release_image_generation(turtle_image_context)

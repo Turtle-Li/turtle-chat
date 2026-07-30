@@ -352,12 +352,12 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
             "o3:standard": _rule(False, None, 0, source="not_in_plan"),
             "image:create": _rule(
                 True,
-                2,
+                10,
                 24 * 60 * 60,
-                source="site_rule",
+                source="observed_upstream",
                 source_note=(
-                    "图片额度独立于文字消息；每次官方生图任务计 1 次，"
-                    "任务返回多张仍计 1 次；官方 Free 上限动态变化。"
+                    "2026-07-30 实测 ChatGPT Web image_gen 余量为 10/日；"
+                    "按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
             ),
         },
@@ -393,12 +393,12 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
             "o3:standard": _rule(False, None, 0, source="not_in_plan"),
             "image:create": _rule(
                 True,
-                10,
+                20,
                 24 * 60 * 60,
                 source="site_rule",
                 source_note=(
-                    "图片额度独立于文字消息；每次官方生图任务计 1 次，"
-                    "任务返回多张仍计 1 次；官方 Go 固定次数未公开。"
+                    "官方 Go 固定图片次数未公开，本站暂按 20/日保守调度；"
+                    "按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
             ),
         },
@@ -465,13 +465,12 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
             ),
             "image:create": _rule(
                 True,
-                40,
-                3 * 60 * 60,
-                source="site_rule",
+                100,
+                24 * 60 * 60,
+                source="observed_upstream",
                 source_note=(
-                    "图片额度独立于文字消息；每次官方生图任务计 1 次，"
-                    "任务返回多张仍计 1 次；以历史常见 50/3h 留出 20% "
-                    "安全余量，官方当前未公布固定值。"
+                    "2026-07-30 实测 ChatGPT Web image_gen 余量为 100/日；"
+                    "按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
             ),
         },
@@ -515,12 +514,12 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
             ),
             "image:create": _rule(
                 True,
-                200,
-                3 * 60 * 60,
+                500,
+                24 * 60 * 60,
                 source="site_rule",
                 source_note=(
-                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
-                    "按本站 Plus 图片基线的 5 倍计算。"
+                    "5× Pro 图片固定次数未公开，暂按 500/日调度；"
+                    "按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
             ),
             "gpt-5-3:standard": _rule(
@@ -577,12 +576,12 @@ CHAT_PLAN_PRESETS: tuple[dict[str, Any], ...] = (
             ),
             "image:create": _rule(
                 True,
-                800,
-                3 * 60 * 60,
-                source="site_rule",
+                1000,
+                24 * 60 * 60,
+                source="observed_upstream",
                 source_note=(
-                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
-                    "按本站 Plus 图片基线的 20 倍计算。"
+                    "2026-07-30 实测 ChatGPT Web image_gen 余量约 1000/日；"
+                    "按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
             ),
             "gpt-5-3:standard": _rule(
@@ -1012,6 +1011,7 @@ class ChatStore:
                     selection_key TEXT NOT NULL,
                     quota_window_id TEXT,
                     cost          INTEGER NOT NULL CHECK (cost >= 0),
+                    usage_units   INTEGER NOT NULL DEFAULT 1 CHECK (usage_units >= 1),
                     status        TEXT NOT NULL CHECK (status IN ('reserved', 'committed', 'released')),
                     created_at    INTEGER NOT NULL,
                     finalized_at  INTEGER
@@ -1242,6 +1242,12 @@ class ChatStore:
             self._ensure_column(connection, "chat_usage", "outcome", "TEXT")
             self._ensure_column(connection, "chat_usage", "error_type", "TEXT")
             self._ensure_column(connection, "chat_usage", "error_phase", "TEXT")
+            self._ensure_column(
+                connection,
+                "chat_usage",
+                "usage_units",
+                "INTEGER NOT NULL DEFAULT 1",
+            )
             self._ensure_column(connection, "chat_quota_window", "window_id", "TEXT")
             storage_added = self._ensure_column(
                 connection,
@@ -2836,13 +2842,12 @@ class ChatStore:
         }
 
     def image_routing_for_user(self, user_id: str, role: str) -> dict[str, Any]:
-        """Resolve the independent image lane and its allowed account tiers.
+        """Resolve the independent image lane and elastic account tiers.
 
-        Custom and legacy GPT groups default to Plus-class image workers. That
-        conservative default prevents an ordinary group from silently spilling
-        into a 20× Pro account. The immutable plan groups retain their explicit
-        tier; the currently deployed 5× product may use either a future 5×
-        worker or a 20× worker while still receiving only its 5× user budget.
+        A user's own image allowance remains authoritative even when the pool
+        temporarily serves the request from a wider subscription.  Narrower
+        accounts are preferred by the Gateway; higher tiers are eligible only
+        as same-Provider overflow, so routing never changes the user's budget.
         """
 
         with self._guard(), self._connect() as connection:
@@ -2856,9 +2861,9 @@ class ChatStore:
             else ("pro-20x" if role == "admin" else "plus")
         )
         required_profiles = {
-            "free": ("free",),
-            "go": ("go", "plus"),
-            "plus": ("plus",),
+            "free": ("free", "go", "plus", "pro-5x", "pro-20x"),
+            "go": ("go", "plus", "pro-5x", "pro-20x"),
+            "plus": ("plus", "pro-5x", "pro-20x"),
             "pro-5x": ("pro-5x", "pro-20x"),
             "pro-20x": ("pro-20x",),
         }[plan]
@@ -4107,8 +4112,8 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT
-                    COALESCE(SUM(CASE WHEN status = 'committed' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN status = 'reserved' THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN status = 'committed' THEN usage_units ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'reserved' THEN usage_units ELSE 0 END), 0)
                   FROM chat_usage
                  WHERE user_id = ? AND selection_key = ? AND quota_window_id = ?
                 """,
@@ -4120,8 +4125,8 @@ class ChatStore:
             row = connection.execute(
                 """
                 SELECT
-                    COALESCE(SUM(CASE WHEN status = 'committed' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN status = 'reserved' THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN status = 'committed' THEN usage_units ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'reserved' THEN usage_units ELSE 0 END), 0)
                   FROM chat_usage
                  WHERE user_id = ? AND selection_key = ?
                    AND created_at >= ? AND created_at < ?
@@ -4487,17 +4492,29 @@ class ChatStore:
             fallback_from=fallback_from,
         )
 
-    def finalize(self, reservation_id: str, status: str) -> None:
+    def finalize(
+        self,
+        reservation_id: str,
+        status: str,
+        *,
+        usage_units: int = 1,
+    ) -> None:
         if status not in {"committed", "released"}:
             raise ValueError("invalid final reservation status")
+        normalized_units = max(1, min(1000, int(usage_units)))
         with self._guard(), self._connect() as connection:
             connection.execute(
                 """
                 UPDATE chat_usage
-                   SET status = ?, finalized_at = ?
+                   SET status = ?, finalized_at = ?, usage_units = ?
                  WHERE id = ? AND status = 'reserved'
                 """,
-                (status, _now(), str(reservation_id)),
+                (
+                    status,
+                    _now(),
+                    normalized_units if status == "committed" else 1,
+                    str(reservation_id),
+                ),
             )
 
     def record_transport(

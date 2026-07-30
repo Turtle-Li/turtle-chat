@@ -131,6 +131,7 @@ class AccountLease:
         status_code: int | None = None,
         error_class: str | None = None,
         retry_after_seconds: int | None = None,
+        usage_units: int = 1,
     ) -> None:
         if self.released:
             return
@@ -148,6 +149,7 @@ class AccountLease:
             status_code=status_code,
             error_class=error_class,
             retry_after_seconds=retry_after_seconds,
+            usage_units=usage_units,
         )
 
 
@@ -185,6 +187,7 @@ class AccountStore(Protocol):
         error_class: str | None,
         cooldown_seconds: int,
         retry_after_seconds: int | None = None,
+        usage_units: int = 1,
     ) -> None: ...
 
     def renew(
@@ -271,16 +274,16 @@ def _quota_usage(
 ) -> dict[str, int | None]:
     since = now - (window_seconds or FAIRNESS_WINDOW_SECONDS)
     successes = [
-        int(item.get("completed_at") or 0)
+        item
         for item in leases
         if item.get("account_id") == account_id
         and item.get("selection_key", "latest:medium") == selection_key
         and item.get("state") == "completed"
-        and item.get("outcome") == "success"
+        and item.get("outcome") in {"success", "upstream_consumed"}
         and int(item.get("completed_at") or 0) > since
     ]
     active = sum(
-        1
+        max(1, int(item.get("usage_units") or 1))
         for item in leases
         if item.get("account_id") == account_id
         and item.get("selection_key", "latest:medium") == selection_key
@@ -288,9 +291,16 @@ def _quota_usage(
         and int(item.get("expires_at") or 0) > now
     )
     return {
-        "used_count": len(successes),
+        "used_count": sum(
+            max(1, int(item.get("usage_units") or 1))
+            for item in successes
+        ),
         "active_count": active,
-        "oldest_success_at": min(successes) if successes else None,
+        "oldest_success_at": (
+            min(int(item.get("completed_at") or 0) for item in successes)
+            if successes
+            else None
+        ),
     }
 
 
@@ -999,6 +1009,7 @@ class MemoryAccountStore:
                 "completed_at": None,
                 "outcome": None,
                 "error_class": None,
+                "usage_units": 1,
             }
             if chat_id:
                 key = (pool_id, str(chat_id))
@@ -1028,6 +1039,7 @@ class MemoryAccountStore:
         error_class: str | None,
         cooldown_seconds: int,
         retry_after_seconds: int | None = None,
+        usage_units: int = 1,
     ) -> None:
         with self._lock:
             now = _now()
@@ -1037,7 +1049,7 @@ class MemoryAccountStore:
             lease.update(
                 state=(
                     "completed"
-                    if outcome == "success"
+                    if outcome in {"success", "upstream_consumed"}
                     else "cancelled"
                     if outcome == "cancelled"
                     else "failed"
@@ -1045,6 +1057,7 @@ class MemoryAccountStore:
                 completed_at=now,
                 outcome=outcome,
                 error_class=error_class,
+                usage_units=max(1, min(1000, int(usage_units))),
             )
             account = self.accounts.get(account_id)
             if not account:
@@ -1679,12 +1692,17 @@ class PostgresAccountStore:
                 expires_at BIGINT NOT NULL,
                 completed_at BIGINT,
                 outcome TEXT,
-                error_class TEXT
+                error_class TEXT,
+                usage_units INTEGER NOT NULL DEFAULT 1
             )
             """,
             """
             ALTER TABLE chat_account_lease
                 ADD COLUMN IF NOT EXISTS selection_key TEXT NOT NULL DEFAULT 'latest:medium'
+            """,
+            """
+            ALTER TABLE chat_account_lease
+                ADD COLUMN IF NOT EXISTS usage_units INTEGER NOT NULL DEFAULT 1
             """,
             """
             CREATE TABLE IF NOT EXISTS chat_account_lane_state (
@@ -1905,10 +1923,11 @@ class PostgresAccountStore:
                 cursor.execute(
                     """
                     SELECT account_id, selection_key, state, expires_at,
-                           completed_at, outcome
+                           completed_at, outcome, usage_units
                       FROM chat_account_lease
                      WHERE (state = 'active' AND expires_at > %s)
-                        OR (state = 'completed' AND outcome = 'success'
+                        OR (state = 'completed'
+                            AND outcome IN ('success', 'upstream_consumed')
                             AND completed_at > %s)
                     """,
                     (now, now - 7 * 24 * 60 * 60),
@@ -2063,11 +2082,12 @@ class PostgresAccountStore:
                 cursor.execute(
                     """
                     SELECT account_id, selection_key, state, expires_at,
-                           completed_at, outcome
+                           completed_at, outcome, usage_units
                       FROM chat_account_lease
                      WHERE pool_id = %s AND selection_key = %s
                        AND ((state = 'active' AND expires_at > %s)
-                         OR (state = 'completed' AND outcome = 'success'
+                         OR (state = 'completed'
+                             AND outcome IN ('success', 'upstream_consumed')
                              AND completed_at > %s))
                     """,
                     (pool_id, selection_key, now, now - 7 * 24 * 60 * 60),
@@ -2210,6 +2230,7 @@ class PostgresAccountStore:
         error_class: str | None,
         cooldown_seconds: int,
         retry_after_seconds: int | None = None,
+        usage_units: int = 1,
     ) -> None:
         now = _now()
         with self._connect() as connection:
@@ -2217,14 +2238,15 @@ class PostgresAccountStore:
                 cursor.execute(
                     """
                     UPDATE chat_account_lease
-                       SET state = %s, completed_at = %s, outcome = %s, error_class = %s
+                       SET state = %s, completed_at = %s, outcome = %s,
+                           error_class = %s, usage_units = %s
                      WHERE request_id = %s AND account_id = %s AND state = 'active'
                      RETURNING selection_key
                     """,
                     (
                         (
                             "completed"
-                            if outcome == "success"
+                            if outcome in {"success", "upstream_consumed"}
                             else "cancelled"
                             if outcome == "cancelled"
                             else "failed"
@@ -2232,6 +2254,7 @@ class PostgresAccountStore:
                         now,
                         outcome,
                         error_class,
+                        max(1, min(1000, int(usage_units))),
                         request_id,
                         account_id,
                     ),
@@ -3111,6 +3134,7 @@ class AccountPoolRouter:
         status_code: int | None,
         error_class: str | None,
         retry_after_seconds: int | None = None,
+        usage_units: int = 1,
     ) -> None:
         await asyncio.to_thread(
             self.store.release,
@@ -3121,6 +3145,7 @@ class AccountPoolRouter:
             error_class=error_class,
             cooldown_seconds=self.cooldown_seconds,
             retry_after_seconds=retry_after_seconds,
+            usage_units=usage_units,
         )
 
     async def snapshot(self) -> dict[str, Any]:

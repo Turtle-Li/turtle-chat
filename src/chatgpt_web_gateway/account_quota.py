@@ -134,12 +134,12 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
             "o3:standard": _lane(False),
             "image:create": _lane(
                 True,
-                2,
+                10,
                 24 * 60 * 60,
-                source="turtle_recommendation",
+                source="observed_upstream",
                 source_note=(
-                    "图片额度与文字额度独立；每次官方生图任务计 1 次，"
-                    "任务返回多张仍计 1 次；官方 Free 固定次数动态变化。"
+                    "2026-07-30 实测 ChatGPT Web image_gen 余量为 10/日；"
+                    "每个任务按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
                 reserve_ratio=0,
             ),
@@ -168,12 +168,12 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
             "o3:standard": _lane(False),
             "image:create": _lane(
                 True,
-                10,
+                20,
                 24 * 60 * 60,
                 source="turtle_recommendation",
                 source_note=(
-                    "图片额度与文字额度独立；每次官方生图任务计 1 次，"
-                    "任务返回多张仍计 1 次；官方 Go 固定次数未公开。"
+                    "官方 Go 固定图片次数未公开，本站暂按 20/日保守调度；"
+                    "每个任务按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
                 reserve_ratio=0.1,
             ),
@@ -235,13 +235,12 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
             ),
             "image:create": _lane(
                 True,
-                40,
-                3 * 60 * 60,
-                source="turtle_recommendation",
+                100,
+                24 * 60 * 60,
+                source="observed_upstream",
                 source_note=(
-                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
-                    "以历史常见 50/3h 留出 20% 调度余量；"
-                    "官方当前未公布固定生图次数。"
+                    "2026-07-30 实测 ChatGPT Web image_gen 余量为 100/日；"
+                    "每个任务按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
                 reserve_ratio=0.1,
             ),
@@ -281,12 +280,12 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
             ),
             "image:create": _lane(
                 True,
-                200,
-                3 * 60 * 60,
-                source="official_multiplier",
+                500,
+                24 * 60 * 60,
+                source="turtle_recommendation",
                 source_note=(
-                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
-                    "按本站 Plus 图片基线的 5 倍调度。"
+                    "5× Pro 图片固定次数未公开，暂按 500/日调度；"
+                    "每个任务按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
                 reserve_ratio=0.1,
             ),
@@ -326,12 +325,12 @@ ACCOUNT_QUOTA_PROFILES: dict[str, dict[str, Any]] = {
             ),
             "image:create": _lane(
                 True,
-                800,
-                3 * 60 * 60,
-                source="official_multiplier",
+                1000,
+                24 * 60 * 60,
+                source="observed_upstream",
                 source_note=(
-                    "每次官方生图任务计 1 次，任务返回多张仍计 1 次；"
-                    "按本站 Plus 图片基线的 20 倍调度。"
+                    "2026-07-30 实测 ChatGPT Web image_gen 余量约 1000/日；"
+                    "每个任务按官方余量实际减少值计数，读取失败才按返回图片数兜底。"
                 ),
                 reserve_ratio=0.1,
             ),

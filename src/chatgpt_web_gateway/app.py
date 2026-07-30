@@ -470,6 +470,38 @@ def _derive_upstream_conversation_key(
     return f"turtle-v1-{digest}"
 
 
+def _image_usage(result: dict[str, Any], asset_count: int) -> dict[str, Any]:
+    """Normalize one task's sanitized official image-allowance delta."""
+
+    raw = result.get("turtle_usage")
+    source = "asset_count_fallback"
+    units = max(1, int(asset_count))
+    remaining: int | None = None
+    reset_after: str | None = None
+    if isinstance(raw, dict):
+        try:
+            candidate = int(raw.get("image_units"))
+        except (TypeError, ValueError):
+            candidate = 0
+        if 1 <= candidate <= 1000:
+            units = candidate
+            source = str(raw.get("source") or source)[:48]
+        try:
+            candidate_remaining = int(raw.get("remaining"))
+        except (TypeError, ValueError):
+            candidate_remaining = -1
+        if candidate_remaining >= 0:
+            remaining = candidate_remaining
+        if isinstance(raw.get("reset_after"), str):
+            reset_after = str(raw["reset_after"])[:80]
+    return {
+        "image_units": units,
+        "source": source,
+        "remaining": remaining,
+        "reset_after": reset_after,
+    }
+
+
 def _rewrite_nonstream(payload: dict[str, Any], public_model: str) -> dict[str, Any]:
     normalized = deepcopy(payload)
     normalized["model"] = public_model
@@ -1589,6 +1621,8 @@ def create_app(
         upstream_payload["response_format"] = "url"
 
         generated: list[dict[str, Any]] = []
+        image_usage: dict[str, Any] | None = None
+        total_image_units = 0
         last_failure: tuple[int, str] | None = None
         total_attempts = 0
         logger.info(
@@ -1604,6 +1638,7 @@ def create_app(
         ):
             total_attempts += 1
             attempt_id = f"{request_id}-{attempt_no}"[:64]
+            attempt_usage: dict[str, Any] | None = None
             try:
                 account_lease = await request.app.state.account_pool.acquire(
                     pool_id=pool_id,
@@ -1634,6 +1669,21 @@ def create_app(
                 )
                 result = await upstream.image_generation(payload)
                 rows = result.get("data")
+                asset_count = (
+                    sum(
+                        1
+                        for image in rows
+                        if isinstance(image, dict) and image.get("url")
+                    )
+                    if isinstance(rows, list)
+                    else 0
+                )
+                attempt_usage = _image_usage(result, asset_count)
+                total_image_units += int(attempt_usage["image_units"])
+                image_usage = {
+                    **attempt_usage,
+                    "image_units": total_image_units,
+                }
                 if not isinstance(rows, list) or not rows:
                     raise UpstreamFailure(
                         502,
@@ -1658,11 +1708,21 @@ def create_app(
                 raise
             except UpstreamFailure as exc:
                 failover_reason = _safe_failover_reason(exc.status_code)
+                consumed = (
+                    attempt_usage is not None
+                    and attempt_usage.get("source")
+                    == "official_remaining_delta"
+                )
                 await account_lease.release(
-                    outcome="error",
+                    outcome="upstream_consumed" if consumed else "error",
                     status_code=exc.status_code,
                     error_class=failover_reason or "image_upstream",
                     retry_after_seconds=exc.retry_after_seconds,
+                    usage_units=(
+                        int(attempt_usage["image_units"])
+                        if consumed
+                        else 1
+                    ),
                 )
                 last_failure = (exc.status_code, exc.message)
                 if failover_reason is not None:
@@ -1688,11 +1748,14 @@ def create_app(
             await account_lease.release(
                 outcome="success",
                 status_code=200,
+                usage_units=int((image_usage or {}).get("image_units") or 1),
             )
             logger.info(
-                "image_task_completed id=%s assets=%d account=%s",
+                "image_task_completed id=%s assets=%d units=%d source=%s account=%s",
                 request_id,
                 len(generated),
+                int((image_usage or {}).get("image_units") or 1),
+                str((image_usage or {}).get("source") or "unknown"),
                 account_lease.account.id,
             )
             break
@@ -1705,10 +1768,27 @@ def create_app(
                 status_code,
                 total_attempts,
             )
-            return _error(status_code, message, "upstream_error")
+            failure: dict[str, Any] = {
+                "error": {
+                    "message": message,
+                    "type": "upstream_error",
+                    "param": None,
+                    "code": None,
+                }
+            }
+            if total_image_units > 0 and image_usage is not None:
+                failure["turtle_usage"] = image_usage
+            return JSONResponse(status_code=status_code, content=failure)
         response: dict[str, Any] = {
             "created": int(time.time()),
             "data": generated,
+            "turtle_usage": image_usage
+            or {
+                "image_units": max(1, len(generated)),
+                "source": "asset_count_fallback",
+                "remaining": None,
+                "reset_after": None,
+            },
         }
         logger.info(
             "image_request_completed id=%s official_tasks=1 assets=%d attempts=%d total_ms=%d",

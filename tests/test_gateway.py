@@ -845,6 +845,12 @@ def test_image_generation_keeps_all_task_assets_and_stable_chat() -> None:
             200,
             json={
                 "created": 1,
+                "turtle_usage": {
+                    "image_units": 1 if len(observed) == 1 else 2,
+                    "source": "official_remaining_delta",
+                    "remaining": 99 if len(observed) == 1 else 97,
+                    "reset_after": "2026-07-31T08:00:00Z",
+                },
                 "data": [
                     {
                         "url": (
@@ -905,6 +911,8 @@ def test_image_generation_keeps_all_task_assets_and_stable_chat() -> None:
     assert follow_up.status_code == 200
     assert len(response.json()["data"]) == 10
     assert len(follow_up.json()["data"]) == 2
+    assert response.json()["turtle_usage"]["image_units"] == 1
+    assert follow_up.json()["turtle_usage"]["image_units"] == 2
     assert len(observed) == 2
     assert all(item["n"] == 1 for item in observed)
     assert observed[0]["conversation_id"] == observed[1]["conversation_id"]
@@ -929,11 +937,13 @@ def test_image_generation_keeps_all_task_assets_and_stable_chat() -> None:
         for item in account["quota"]["lanes"]
         if item["selection_key"] == "image:create"
     )
-    assert lane["used_count"] == 2
+    # The first task returned ten assets but the official allowance moved by
+    # one unit; the second moved by two. Official movement wins over asset count.
+    assert lane["used_count"] == 3
     assert lane["active_count"] == 0
 
 
-def test_image_generation_never_spills_plus_request_into_pro_profile() -> None:
+def test_image_generation_allows_plus_request_to_overflow_into_pro_profile() -> None:
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -966,13 +976,79 @@ def test_image_generation_never_spills_plus_request_into_pro_profile() -> None:
                 "n": 1,
                 "response_format": "url",
                 "turtle_user_id": "user-plus",
-                "turtle_request_id": "img-plus-isolation",
-                "turtle_required_quota_profiles": ["plus"],
+                "turtle_request_id": "img-plus-overflow",
+                "turtle_required_quota_profiles": [
+                    "plus",
+                    "pro-5x",
+                    "pro-20x",
+                ],
             },
         )
 
-    assert response.status_code == 503
-    assert calls == 0
+    assert response.status_code == 200
+    assert calls == 1
+
+
+def test_empty_image_task_preserves_official_consumption_without_replay() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "data": [],
+                "turtle_usage": {
+                    "image_units": 3,
+                    "source": "official_remaining_delta",
+                    "remaining": 97,
+                    "reset_after": "2026-07-31T08:00:00Z",
+                },
+            },
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        client.app.state.account_pool.store.accounts["legacy-primary"][
+            "quota_profile"
+        ] = "plus"
+        response = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "one product concept",
+                "n": 1,
+                "response_format": "url",
+                "turtle_user_id": "user-plus",
+                "turtle_request_id": "img-consumed-empty",
+                "turtle_required_quota_profiles": ["plus"],
+            },
+        )
+        snapshot = client.get(
+            "/internal/account-pools",
+            headers=headers(),
+        ).json()
+
+    assert response.status_code == 502
+    assert response.json()["turtle_usage"]["image_units"] == 3
+    assert calls == 1
+    account = next(
+        item
+        for item in snapshot["accounts"]
+        if item["id"] == "legacy-primary"
+    )
+    lane = next(
+        item
+        for item in account["quota"]["lanes"]
+        if item["selection_key"] == "image:create"
+    )
+    assert lane["used_count"] == 3
 
 
 def test_image_url_count_reports_only_structured_media() -> None:

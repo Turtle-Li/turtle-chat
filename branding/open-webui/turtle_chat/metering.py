@@ -240,16 +240,20 @@ async def prepare_image_generation(
 async def finalize_image_generation(
     context: ImageGenerationContext | None,
     successful: bool,
+    *,
+    usage_units: int = 1,
 ) -> None:
-    """Commit exactly one successful official task, regardless of asset count."""
+    """Commit the official image allowance delta reported for this task."""
 
     if context is None or context.completed:
         return
     context.completed = True
+    normalized_units = max(1, min(1000, int(usage_units)))
     await asyncio.to_thread(
         CHAT_STORE.finalize,
         context.reservation.id,
         "committed" if successful else "released",
+        usage_units=normalized_units if successful else 1,
     )
 
 
