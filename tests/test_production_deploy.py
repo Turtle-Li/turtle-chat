@@ -106,3 +106,15 @@ def test_blue_green_image_generation_uses_its_gateway_credentials() -> None:
         )
         == 2
     )
+
+
+def test_remote_deploy_rejects_an_image_route_that_bypasses_gateway() -> None:
+    deploy = DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'expected_base="http://gateway-${slot}:8000/v1"' in deploy
+    assert "candidate Open WebUI image route bypasses its Gateway" in deploy
+    assert "candidate Open WebUI image Gateway credential is missing" in deploy
+    assert 'grep -E \'^IMAGES_OPENAI_API_KEY=.+$\'' in deploy
+    assert deploy.index('assert_image_gateway_route "$candidate_slot"') < deploy.index(
+        'log "switching new connections to $candidate_slot"'
+    )

@@ -235,6 +235,24 @@ direct_probe() {
     wget -q -T 15 -O /dev/null "http://${service}:${port}${path}"
 }
 
+assert_image_gateway_route() {
+  local slot=$1
+  local service="open-webui-$slot"
+  local id
+  local expected_base="http://gateway-${slot}:8000/v1"
+
+  id=$(container_id "$service")
+  [[ -n $id ]] || fail "candidate Open WebUI container is missing"
+  if ! docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id" |
+       grep -Fx "IMAGES_OPENAI_API_BASE_URL=$expected_base" >/dev/null; then
+    fail "candidate Open WebUI image route bypasses its Gateway"
+  fi
+  if ! docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$id" |
+       grep -E '^IMAGES_OPENAI_API_KEY=.+$' >/dev/null; then
+    fail "candidate Open WebUI image Gateway credential is missing"
+  fi
+}
+
 render_router() {
   local slot=$1
   local destination=$2
@@ -256,6 +274,7 @@ compose up -d --no-build --no-deps "gateway-$candidate_slot"
 wait_healthy "gateway-$candidate_slot" 72 || fail "candidate Gateway did not become healthy"
 compose up -d --no-build --no-deps "open-webui-$candidate_slot"
 wait_healthy "open-webui-$candidate_slot" 120 || fail "candidate Open WebUI did not become healthy"
+assert_image_gateway_route "$candidate_slot"
 direct_probe "gateway-$candidate_slot" 8000 /healthz || fail "candidate Gateway direct probe failed"
 direct_probe "open-webui-$candidate_slot" 8080 /health || fail "candidate Open WebUI direct probe failed"
 
