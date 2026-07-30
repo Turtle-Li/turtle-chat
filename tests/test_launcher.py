@@ -409,7 +409,7 @@ def test_gpt4free_overlay_tracks_official_image_delta_and_conversation() -> None
 
     assert '+                    "system_hints": ["picture_v2"],' in overlay
     assert 'and item.get("feature_name") == "image_gen"' in overlay
-    assert '+                usage_source = "official_remaining_delta"' in overlay
+    assert '+            usage_source = "official_remaining_delta"' in overlay
     assert '+        options["turtle_usage"] = {' in overlay
     assert "+            async with provider_handler._image_task_lock():" in overlay
     assert "+            if conversation is None and turtle_conversation_key:" in overlay
@@ -430,6 +430,22 @@ def test_gpt4free_overlay_tracks_official_image_delta_and_conversation() -> None
         "+                    conversation.conversation_id = task_conversation_id"
         in overlay
     )
+    assert (
+        '+                    and str(collection_error) == "Error in message stream"'
+        in overlay
+    )
+    assert '+                    await asyncio.sleep(3)' in overlay
+    assert (
+        '+                    quota_confirm = await read_image_quota('
+        '"retry confirmation")'
+        in overlay
+    )
+    assert (
+        '+                        print("turtle_image_safe_retry=1", flush=True)'
+        in overlay
+    )
+    assert "+                    and image_remaining(quota_before)" in overlay
+    assert "+                    == image_remaining(quota_after)" in overlay
 
 
 def test_gpt4free_overlay_runs_independent_preflight_requests_in_parallel() -> None:
