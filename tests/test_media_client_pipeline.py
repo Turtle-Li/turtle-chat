@@ -59,6 +59,7 @@ def test_composer_media_is_prepared_before_send_and_uploaded_only_after_release(
 
 def test_deferred_media_flush_covers_button_enter_cancel_and_duplicate_send() -> None:
     source = CONTROLS.read_text(encoding="utf-8")
+    styles = (CONTROLS.parent / "custom.css").read_text(encoding="utf-8")
 
     assert "const flushDeferredComposerUploads = async () => {" in source
     assert "if (deferredUploadFlush) {" in source
@@ -70,8 +71,15 @@ def test_deferred_media_flush_covers_button_enter_cancel_and_duplicate_send() ->
     assert "cancelledUploadResponse()" in source
     assert "待发送" not in source
     assert "压缩中" not in source
-    assert "正在上传 ${count} 个附件" not in source
-    assert "turtle-deferred-upload-status" not in source
+    assert "正在上传 ${imageCount} 张图片…" in source
+    assert "正在上传 ${active.length || 1} 个附件…" in source
+    assert "turtle-deferred-upload-status" in source
+    assert "setDeferredUploadBusy(true, tasks);" in source
+    assert 'status.setAttribute("role", "status");' in source
+    assert "#send-message-button[data-turtle-deferred-upload-busy=\"true\"]::after" in styles
+    assert "top: 50%;" in styles
+    assert "left: 50%;" in styles
+    assert "translate(-50%, -50%) rotate(360deg)" in styles
 
 
 def test_direct_cos_upload_retries_only_transient_failures_with_a_small_bound() -> None:

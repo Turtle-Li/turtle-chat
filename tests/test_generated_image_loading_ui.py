@@ -44,4 +44,4 @@ def test_generated_gallery_hides_broken_images_and_stop_button_has_immediate_css
 def test_storage_asset_version_changes_with_the_loading_fix() -> None:
     patcher = (BRANDING / "patch_open_webui.py").read_text(encoding="utf-8")
 
-    assert "turtle-storage-controls.js?v=20260730.4" in patcher
+    assert "turtle-storage-controls.js?v=20260730.5" in patcher

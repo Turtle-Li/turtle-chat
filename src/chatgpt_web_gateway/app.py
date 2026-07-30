@@ -1617,6 +1617,19 @@ def create_app(
             "turtle_required_quota_profiles",
         ):
             upstream_payload.pop(field, None)
+        upstream_payload.pop("media", None)
+        turtle_media = upstream_payload.pop("turtle_media", [])
+        if turtle_media:
+            upstream_payload["media"] = [
+                [
+                    {
+                        "url": item["url"],
+                        "turtle_source": item["turtle_source"],
+                    },
+                    item["name"],
+                ]
+                for item in turtle_media
+            ]
         upstream_payload["n"] = 1
         upstream_payload["response_format"] = "url"
 
@@ -1626,10 +1639,11 @@ def create_app(
         last_failure: tuple[int, str] | None = None
         total_attempts = 0
         logger.info(
-            "image_request_route id=%s official_tasks=1 chat_bound=%s profiles=%s",
+            "image_request_route id=%s official_tasks=1 chat_bound=%s profiles=%s references=%s",
             request_id,
             int(bool(body.turtle_chat_id)),
             ",".join(sorted(required_profiles)),
+            len(body.turtle_media),
         )
         attempted_account_ids: set[str] = set()
         for attempt_no in range(

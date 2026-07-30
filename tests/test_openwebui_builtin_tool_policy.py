@@ -12,6 +12,7 @@ spec.loader.exec_module(tool_policy)
 
 should_enable_builtin_tools = tool_policy.should_enable_builtin_tools
 builtin_tool_reasons = tool_policy.builtin_tool_reasons
+explicit_image_generation_intent = tool_policy.explicit_image_generation_intent
 
 
 def test_plain_conversation_uses_fast_path() -> None:
@@ -80,9 +81,23 @@ def test_memory_tools_require_explicit_memory_intent() -> None:
     )
 
 
+def test_direct_image_creation_intent_is_narrow_and_multilingual() -> None:
+    assert explicit_image_generation_intent(
+        "掐丝竹茶盘，尺寸在图中标注了，帮我生成5张淘宝封面方图，2k图"
+    )
+    assert explicit_image_generation_intent("请画一张海边日落的插画")
+    assert explicit_image_generation_intent("Create three product cover images")
+
+    assert not explicit_image_generation_intent("怎么生成淘宝封面图？")
+    assert not explicit_image_generation_intent("请解释图片生成模型的原理")
+    assert not explicit_image_generation_intent("不要生成图片，只分析构图")
+    assert not explicit_image_generation_intent("分析这张图片里的尺寸")
+
+
 def test_patcher_wires_policy_before_builtin_resolution() -> None:
     patcher = (OPEN_WEBUI_BRANDING / "patch_open_webui.py").read_text(encoding="utf-8")
-    assert "from open_webui.turtle_chat.tool_policy import builtin_tool_reasons" in patcher
+    assert "explicit_image_generation_intent," in patcher
+    assert "turtle_image_generation_auto_enabled=1" in patcher
     assert "builtin_tool_reasons_for_turn = builtin_tool_reasons(" in patcher
     assert "model_knowledge=get_attached_knowledge(model, metadata)" in patcher
     assert "turtle_builtin_tool_policy enabled=%s reasons=%s" in patcher

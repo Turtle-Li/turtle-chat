@@ -4330,19 +4330,42 @@ html.light #navbar-bg-gradient-to-b {
 
 #send-message-button[data-turtle-deferred-upload-busy="true"]::after {
   position: absolute;
+  top: 50%;
+  left: 50%;
   width: 0.9rem;
   height: 0.9rem;
   border: 2px solid rgba(3, 17, 31, 0.28);
   border-top-color: #03111f;
   border-radius: 50%;
   content: "";
-  animation: turtle-spin 700ms linear infinite;
+  animation: turtle-upload-spin 700ms linear infinite;
+  pointer-events: none;
 }
 
-@keyframes turtle-spin {
-  to {
-    transform: rotate(360deg);
+@keyframes turtle-upload-spin {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
   }
+
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+.turtle-deferred-upload-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.75rem;
+  margin-right: 0.25rem;
+  padding: 0.25rem 0.55rem;
+  color: rgba(225, 249, 253, 0.94);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1rem;
+  white-space: nowrap;
+  background: rgba(7, 30, 44, 0.78);
+  border: 1px solid rgba(94, 226, 242, 0.2);
+  border-radius: 999px;
 }
 
 #turtle-chat-home {

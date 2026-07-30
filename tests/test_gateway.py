@@ -885,6 +885,14 @@ def test_image_generation_keeps_all_task_assets_and_stable_chat() -> None:
                 "turtle_request_id": "img-request-sticky",
                 "turtle_account_pool_id": "gpt-default",
                 "turtle_required_quota_profiles": ["plus"],
+                "media": [["https://untrusted.example.test/image.png", "bad.png"]],
+                "turtle_media": [
+                    {
+                        "url": "https://files.example.test/reference.png",
+                        "turtle_source": "sealed-reference-token-1",
+                        "name": "reference-1.png",
+                    }
+                ],
             },
         )
         follow_up = client.post(
@@ -915,6 +923,17 @@ def test_image_generation_keeps_all_task_assets_and_stable_chat() -> None:
     assert follow_up.json()["turtle_usage"]["image_units"] == 2
     assert len(observed) == 2
     assert all(item["n"] == 1 for item in observed)
+    assert observed[0]["media"] == [
+        [
+            {
+                "url": "https://files.example.test/reference.png",
+                "turtle_source": "sealed-reference-token-1",
+            },
+            "reference-1.png",
+        ]
+    ]
+    assert "turtle_media" not in observed[0]
+    assert "media" not in observed[1]
     assert observed[0]["conversation_id"] == observed[1]["conversation_id"]
     assert observed[0]["conversation_id"] == _derive_upstream_conversation_key(
         "gateway-test-key",

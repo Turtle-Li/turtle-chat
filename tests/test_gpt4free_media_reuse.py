@@ -269,6 +269,16 @@ class ModelSourceEnvelopeTests(unittest.TestCase):
         self.assertIsInstance(merged[0][0], ModelMediaSource)
         self.assertEqual(merged[0][0].media_id, "a" * 64)
 
+    def test_merge_accepts_direct_managed_media_for_image_endpoint(self):
+        image_url = sealed_image_url()
+
+        merged = list(_merge_model_media([(image_url, "reference.png")], []))
+
+        self.assertEqual(len(merged), 1)
+        self.assertIsInstance(merged[0][0], ModelMediaSource)
+        self.assertEqual(merged[0][0].media_id, "a" * 64)
+        self.assertEqual(merged[0][1], "reference.png")
+
 
 class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

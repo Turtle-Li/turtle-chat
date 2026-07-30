@@ -736,9 +736,21 @@
     if (task) cancelDeferredUpload(task);
   };
 
-  const setDeferredUploadBusy = (busy) => {
+  const deferredUploadStatusCopy = (tasks) => {
+    const active = Array.isArray(tasks) ? tasks : [];
+    const imageCount = active.filter((task) =>
+      String(task?.file?.type || "").toLowerCase().startsWith("image/")
+    ).length;
+    if (imageCount === active.length && imageCount > 0) {
+      return `正在上传 ${imageCount} 张图片…`;
+    }
+    return `正在上传 ${active.length || 1} 个附件…`;
+  };
+
+  const setDeferredUploadBusy = (busy, tasks = []) => {
     const composer = document.querySelector("#message-input-container");
     const sendButton = document.querySelector("#send-message-button");
+    document.querySelectorAll(".turtle-deferred-upload-status").forEach((node) => node.remove());
     if (composer) {
       composer.toggleAttribute("data-turtle-deferred-upload-busy", busy);
       composer.setAttribute("aria-busy", String(busy));
@@ -746,13 +758,26 @@
     if (busy) {
       if (sendButton) {
         sendButton.dataset.turtleDeferredUploadBusy = "true";
+        sendButton.dataset.turtleDeferredUploadLabel =
+          sendButton.getAttribute("aria-label") || "";
         sendButton.setAttribute("aria-busy", "true");
+        sendButton.setAttribute("aria-label", deferredUploadStatusCopy(tasks));
+        const status = document.createElement("span");
+        status.className = "turtle-deferred-upload-status";
+        status.setAttribute("role", "status");
+        status.setAttribute("aria-live", "polite");
+        status.textContent = deferredUploadStatusCopy(tasks);
+        sendButton.insertAdjacentElement("beforebegin", status);
       }
       return;
     }
     if (sendButton?.dataset.turtleDeferredUploadBusy === "true") {
       delete sendButton.dataset.turtleDeferredUploadBusy;
       sendButton.removeAttribute("aria-busy");
+      const previousLabel = sendButton.dataset.turtleDeferredUploadLabel || "";
+      delete sendButton.dataset.turtleDeferredUploadLabel;
+      if (previousLabel) sendButton.setAttribute("aria-label", previousLabel);
+      else sendButton.removeAttribute("aria-label");
     }
   };
 
@@ -805,7 +830,7 @@
     if (!tasks.length) return true;
 
     deferredUploadFlush = (async () => {
-      setDeferredUploadBusy(true);
+      setDeferredUploadBusy(true, tasks);
       tasks.forEach((task) => task.release());
       const results = await Promise.allSettled(tasks.map((task) => task.done));
       const nativeSettled = await settleNativeUploadState(tasks);

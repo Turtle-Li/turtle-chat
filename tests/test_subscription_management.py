@@ -81,8 +81,8 @@ def test_chat_ui_blocks_pending_and_expired_without_hiding_pages() -> None:
     assert "管理员不限额" in script
     assert "不受站内次数限制" in script
     assert "turtle-model-controls.js?v=20260728.10" in patcher
-    assert "custom.css?v=20260730.3" in patcher
-    assert "turtle-storage-controls.js?v=20260730.4" in patcher
+    assert "custom.css?v=20260730.4" in patcher
+    assert "turtle-storage-controls.js?v=20260730.5" in patcher
 
 
 def test_startup_splash_uses_ios_material_and_visible_progress_until_the_app_is_ready() -> None:
@@ -252,6 +252,9 @@ def test_quota_countdown_floors_partial_units_and_generated_outputs_are_decorate
     assert "Math.ceil((seconds % 3600) / 60)" not in model_script
     assert "def requested_image_count" in media
     assert "'n': requested_image_count(user_message)" in patcher
+    assert "'turtle_media': form_data.turtle_media" in patcher
+    assert "get_presigned_model_image_source(image_url, user)" in patcher
+    assert "and not strict_media_mode()" in patcher
     assert "decorateManagedOutputs" in storage_script
     assert "turtle-generated-gallery" in storage_script
     assert "prepareGeneratedImageEdit" in storage_script

@@ -101,12 +101,12 @@ replace_once(
     index_path,
     """\t\t<link rel="stylesheet" href="/static/custom.css" crossorigin="use-credentials" />
 """,
-    """\t\t<link rel="stylesheet" href="/static/custom.css?v=20260730.3" crossorigin="use-credentials" />
+    """\t\t<link rel="stylesheet" href="/static/custom.css?v=20260730.4" crossorigin="use-credentials" />
 \t\t<link rel="preload" href="/static/turtle-gpt-logo.webp" as="image" type="image/webp" fetchpriority="high" />
 \t\t<link rel="preload" href="/static/turtle-provider-chatgpt.svg" as="image" type="image/svg+xml" />
 \t\t<link rel="preload" href="/static/turtle-provider-claude.svg" as="image" type="image/svg+xml" />
 \t\t<script defer src="/static/turtle-model-controls.js?v=20260728.10" crossorigin="use-credentials"></script>
-\t\t<script defer src="/static/turtle-storage-controls.js?v=20260730.4" crossorigin="use-credentials"></script>
+\t\t<script defer src="/static/turtle-storage-controls.js?v=20260730.5" crossorigin="use-credentials"></script>
 """,
 )
 replace_once(
@@ -2368,6 +2368,26 @@ from open_webui.turtle_chat.metering import (
 )
 replace_once(
     images_router_path,
+    """class CreateImageForm(BaseModel):
+    model: str | None = None
+    prompt: str
+    size: str | None = None
+    n: int = 1
+    steps: int | None = None
+    negative_prompt: str | None = None
+""",
+    """class CreateImageForm(BaseModel):
+    model: str | None = None
+    prompt: str
+    size: str | None = None
+    n: int = 1
+    steps: int | None = None
+    negative_prompt: str | None = None
+    turtle_media: list[dict] | None = None
+""",
+)
+replace_once(
+    images_router_path,
     """                **({} if not image_config.IMAGES_OPENAI_API_PARAMS else image_config.IMAGES_OPENAI_API_PARAMS),
             }
 
@@ -2386,6 +2406,11 @@ replace_once(
                 **data,
                 **turtle_image_context.routing_payload(),
                 'turtle_user_id': str(user.id),
+                **(
+                    {'turtle_media': form_data.turtle_media}
+                    if form_data.turtle_media
+                    else {}
+                ),
             }
             session = await get_session()
 """,
@@ -2525,8 +2550,28 @@ replace_once(
     visible_stream_output,
 )
 from open_webui.turtle_storage.pump import strict_media_mode
-from open_webui.turtle_chat.tool_policy import builtin_tool_reasons
+from open_webui.turtle_chat.tool_policy import (
+    builtin_tool_reasons,
+    explicit_image_generation_intent,
+)
 from open_webui.utils.filter import (
+""",
+)
+replace_once(
+    middleware_path,
+    """    features = form_data.pop('features', None) or {}
+    extra_params['__features__'] = features
+""",
+    """    features = form_data.pop('features', None) or {}
+    if (
+        not features.get('image_generation')
+        and explicit_image_generation_intent(
+            get_last_user_message(form_data.get('messages', []))
+        )
+    ):
+        features['image_generation'] = True
+        log.info('turtle_image_generation_auto_enabled=1')
+    extra_params['__features__'] = features
 """,
 )
 replace_once(
@@ -2581,12 +2626,44 @@ replace_once(
 )
 replace_once(
     middleware_path,
+    """    system_message_content = ''
+
+    if len(input_images) > 0 and await Config.get('images.edit.enable'):
+""",
+    """    turtle_media = []
+    if strict_media_mode() and input_images:
+        for index, image_url in enumerate(input_images):
+            source = await get_presigned_model_image_source(image_url, user)
+            if source is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail='参考图暂时无法读取，请移除后重新上传',
+                )
+            turtle_media.append(
+                {
+                    **source,
+                    'name': f'reference-{index + 1}.png',
+                }
+            )
+
+    system_message_content = ''
+
+    if (
+        len(input_images) > 0
+        and await Config.get('images.edit.enable')
+        and not strict_media_mode()
+    ):
+""",
+)
+replace_once(
+    middleware_path,
     """                form_data=CreateImageForm(**{'prompt': prompt}),
 """,
     """                form_data=CreateImageForm(
                     **{
                         'prompt': prompt,
                         'n': requested_image_count(user_message),
+                        'turtle_media': turtle_media,
                     }
                 ),
 """,

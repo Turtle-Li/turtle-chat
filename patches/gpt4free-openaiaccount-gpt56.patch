@@ -54,7 +54,7 @@ index 36d75ec..c8f3bb9 100644
  from ..openai.har_file import get_request_config
  from ..openai.har_file import RequestConfig, arkReq, arkose_url, start_url, conversation_url, backend_url, prepare_url, \
      backend_anon_url
-@@ -93,6 +112,1519 @@ UPLOAD_HEADERS = {
+@@ -93,6 +112,1527 @@ UPLOAD_HEADERS = {
  }
  
  ImagesCache: Dict[str, dict] = {}
@@ -1243,7 +1243,15 @@ index 36d75ec..c8f3bb9 100644
 +    for item in merge_media(media, messages):
 +        is_tuple = isinstance(item, tuple)
 +        source, *rest = item if is_tuple else (item,)
-+        managed = managed_by_url.get(source) if isinstance(source, str) else None
++        managed = (
++            source
++            if (
++                isinstance(source, dict)
++                and isinstance(source.get("url"), str)
++                and source.get("turtle_source") is not None
++            )
++            else managed_by_url.get(source) if isinstance(source, str) else None
++        )
 +        normalized = open_model_source(managed) if managed is not None else source
 +        media_id = normalized.media_id if isinstance(normalized, ModelMediaSource) else None
 +        primary_url = (
@@ -4995,11 +5003,12 @@ diff --git a/g4f/api/stubs.py b/g4f/api/stubs.py
 index facb4a4..9ed391f 100644
 --- a/g4f/api/stubs.py
 +++ b/g4f/api/stubs.py
-@@ -115,6 +115,7 @@ class ImageGenerationConfig(BaseModel):
+@@ -115,6 +115,8 @@ class ImageGenerationConfig(BaseModel):
      prompt: str
      model: Optional[str] = None
      provider: Optional[str] = None
 +    conversation_id: Optional[str] = None
++    media: Optional[list] = None
      response_format: Optional[str] = None
      api_key: Optional[str] = None
      width: Optional[int] = None

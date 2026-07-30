@@ -47,6 +47,43 @@ _EXPLICIT_TOOL_FEATURES = (
     "code_interpreter",
 )
 
+_IMAGE_GENERATION_INTENT = re.compile(
+    r"""
+    (?:
+        (?:帮我|请|给我|为我)?(?:生成|画|绘制|制作|做|设计|创作|出)
+        .{0,16}?
+        (?:\d+\s*)?(?:张|幅|组|套)?
+        (?:图片|图像|配图|插画|海报|封面(?:方图)?|效果图|商品图|主图)
+        |\b(?:generate|create|make|draw|design|render)\b
+        .{0,32}?
+        \b(?:images?|pictures?|illustrations?|posters?|covers?|artwork)\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_IMAGE_GENERATION_NEGATION = re.compile(
+    r"""
+    (?:
+        (?:不要|别|无需|不需要|禁止).{0,8}(?:生成|画|绘制|制作|设计|创作|出图)
+        |\b(?:do\s+not|don't|dont|no\s+need\s+to|without)\b
+        .{0,20}?\b(?:generate|create|make|draw|design|render)\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_IMAGE_GENERATION_EXPLANATION = re.compile(
+    r"""
+    (?:
+        (?:如何|怎么|怎样|为什么|教程|解释|介绍).{0,18}(?:生成|画|绘制|制作|设计|创作)
+        |\b(?:how|why|tutorial|explain)\b.{0,24}?
+        \b(?:generate|create|make|draw|design|render)\b
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 
 def _has_items(value: Any) -> bool:
     if value is None:
@@ -58,6 +95,16 @@ def _has_items(value: Any) -> bool:
     if isinstance(value, Sequence):
         return bool(value)
     return bool(value)
+
+
+def explicit_image_generation_intent(prompt: str | None) -> bool:
+    """Recognize direct creation requests without treating questions as jobs."""
+
+    if not prompt or not _IMAGE_GENERATION_INTENT.search(prompt):
+        return False
+    if _IMAGE_GENERATION_NEGATION.search(prompt):
+        return False
+    return not bool(_IMAGE_GENERATION_EXPLANATION.search(prompt))
 
 
 def builtin_tool_reasons(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -86,6 +87,28 @@ class ChatCompletionRequest(BaseModel):
         return self
 
 
+class ImageGenerationReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(min_length=8, max_length=8192)
+    turtle_source: str = Field(min_length=16, max_length=16_384)
+    name: str = Field(default="reference.png", min_length=1, max_length=120)
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        if not value.startswith("https://"):
+            raise ValueError("参考图地址必须使用 HTTPS")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,119}", value):
+            raise ValueError("参考图名称无效")
+        return value
+
+
 class ImageGenerationRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -116,6 +139,10 @@ class ImageGenerationRequest(BaseModel):
     turtle_required_quota_profiles: list[str] = Field(
         default_factory=list,
         max_length=4,
+    )
+    turtle_media: list[ImageGenerationReference] = Field(
+        default_factory=list,
+        max_length=20,
     )
 
     @field_validator("turtle_required_quota_profiles")
