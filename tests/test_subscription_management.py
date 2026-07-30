@@ -254,6 +254,7 @@ def test_quota_countdown_floors_partial_units_and_generated_outputs_are_decorate
     assert "'n': requested_image_count(user_message)" in patcher
     assert "'turtle_media': form_data.turtle_media" in patcher
     assert "get_presigned_model_image_source(image_url, user)" in patcher
+    assert "message_list = bind_message_image_file_ids(message_list)" in patcher
     assert "and not strict_media_mode()" in patcher
     assert "decorateManagedOutputs" in storage_script
     assert "turtle-generated-gallery" in storage_script

@@ -2626,6 +2626,21 @@ replace_once(
 )
 replace_once(
     middleware_path,
+    """    user_message = get_last_user_message(message_list)
+
+    prompt = user_message
+""",
+    """    # Recover immutable managed file IDs before extracting reference images.
+    # Saved conversations may display an expired Pump URL while their message
+    # file metadata still carries the authoritative user-owned file IDs.
+    message_list = bind_message_image_file_ids(message_list)
+    user_message = get_last_user_message(message_list)
+
+    prompt = user_message
+""",
+)
+replace_once(
+    middleware_path,
     """    system_message_content = ''
 
     if len(input_images) > 0 and await Config.get('images.edit.enable'):
