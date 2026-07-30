@@ -1,5 +1,5 @@
 diff --git a/g4f/Provider/needs_auth/OpenaiChat.py b/g4f/Provider/needs_auth/OpenaiChat.py
-index 36d75ec..1ad5709 100644
+index 36d75ec..c8f3bb9 100644
 --- a/g4f/Provider/needs_auth/OpenaiChat.py
 +++ b/g4f/Provider/needs_auth/OpenaiChat.py
 @@ -4,15 +4,24 @@ import asyncio
@@ -2868,9 +2868,25 @@ index 36d75ec..1ad5709 100644
                      conversation.generated_images = None
                  conversation.prompt = None
                  if return_conversation:
-@@ -733,14 +3134,108 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -732,15 +3133,124 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+                 else:
                      break
  
++            if (
++                conversation.conversation_id is None
++                and isinstance(conversation.task, dict)
++            ):
++                task_conversation_id = conversation.task.get("conversation_id")
++                if (
++                    isinstance(task_conversation_id, str)
++                    and SAFE_UPSTREAM_ID_RE.fullmatch(task_conversation_id)
++                ):
++                    # Image-only streams can disclose the newly created
++                    # conversation only through their async-task envelope.
++                    # Promote it before caching so the next Turtle turn is a
++                    # real upstream continuation instead of a new chat.
++                    conversation.conversation_id = task_conversation_id
++
              if conversation.task and kwargs.get("wait_media", True):
 -                async for _m in cls.wss_media(session, conversation, auth_result.headers, auth_result):
 +                async for _m in cls.wait_media(
@@ -2981,7 +2997,7 @@ index 36d75ec..1ad5709 100644
      @classmethod
      async def wss_media(
          cls,
-@@ -801,6 +3296,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -801,6 +3311,7 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                                  conversation.prompt or "",
                                  conversation.conversation_id,
                                  status,
@@ -2989,7 +3005,7 @@ index 36d75ec..1ad5709 100644
                              )
                              if generated_images is not None:
                                  yield generated_images
-@@ -820,11 +3316,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -820,11 +3331,13 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      ) -> AsyncGenerator[Any, None]:
          start_time = asyncio.get_event_loop().time()
          seen_assets: Set[str] = set()
@@ -3007,7 +3023,7 @@ index 36d75ec..1ad5709 100644
              if timeout is not None:
                  elapsed = asyncio.get_event_loop().time() - start_time
                  if elapsed > timeout:
-@@ -839,33 +3337,56 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -839,33 +3352,56 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
  
              mapping = data.get("mapping") or {}
              if not mapping:
@@ -3083,7 +3099,7 @@ index 36d75ec..1ad5709 100644
                      generated_images = await cls.get_generated_image(
                          session,
                          auth_result,
-@@ -875,13 +3396,287 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -875,13 +3411,287 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          or "",
                          conversation.conversation_id,
                          status,
@@ -3372,7 +3388,7 @@ index 36d75ec..1ad5709 100644
      @classmethod
      async def iter_messages_line(cls, session: StreamSession, auth_result: AuthResult, line: bytes,
                                   fields: Conversation, sources: OpenAISources,
-@@ -896,6 +3691,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -896,6 +3706,11 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              return
          if not isinstance(line, dict):
              return
@@ -3384,7 +3400,7 @@ index 36d75ec..1ad5709 100644
          if "type" in line:
              if line["type"] == "title_generation":
                  yield TitleGeneration(line["title"])
-@@ -903,11 +3703,29 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -903,11 +3718,29 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
          if fields.p is not None and fields.p.startswith("/message/content/thoughts"):
              if fields.p.endswith("/content"):
                  if fields.thoughts_summary:
@@ -3416,7 +3432,7 @@ index 36d75ec..1ad5709 100644
              return
          if "v" in line:
              v = line.get("v")
-@@ -923,80 +3741,153 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -923,80 +3756,153 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                          buffer += m.get("v")
                      elif m.get("p") == "/message/metadata/image_gen_title":
                          fields.prompt = m.get("v")
@@ -3621,7 +3637,7 @@ index 36d75ec..1ad5709 100644
                      elif m.get("p") == "/message/metadata/finished_text":
                          fields.is_thinking = False
                          if buffer:
-@@ -1011,27 +3902,94 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1011,27 +3917,94 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                  if fields.conversation_id is None:
                      fields.conversation_id = v.get("conversation_id")
                      debug.log(f"OpenaiChat: New conversation: {fields.conversation_id}")
@@ -3727,7 +3743,7 @@ index 36d75ec..1ad5709 100644
  
      @classmethod
      async def synthesize(cls, params: dict) -> AsyncIterator[bytes]:
-@@ -1090,33 +4048,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1090,33 +4063,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      @classmethod
      async def nodriver_auth(cls, proxy: str = None):
          async with get_nodriver_session(proxy=proxy) as browser:
@@ -3780,7 +3796,7 @@ index 36d75ec..1ad5709 100644
                      )
  
              await page.send(nodriver.cdp.network.enable())
-@@ -1124,29 +4085,31 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1124,29 +4100,31 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              await page.reload()
              user_agent = await page.evaluate("window.navigator.userAgent", return_by_value=True)
              debug.log(f"OpenaiChat: User-Agent: {user_agent}")
@@ -3835,7 +3851,7 @@ index 36d75ec..1ad5709 100644
                  body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
                  if hasattr(body, "value"):
                      body = body.value
-@@ -1159,7 +4122,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1159,7 +4137,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
                      break
                  await asyncio.sleep(1)
                  debug.log("OpenaiChat: Waiting for access token...")
@@ -3846,7 +3862,7 @@ index 36d75ec..1ad5709 100644
              #while True:
              #    if cls.request_config.proof_token:
              #        break
-@@ -1238,6 +4203,20 @@ class Conversation(JsonConversation):
+@@ -1238,6 +4218,20 @@ class Conversation(JsonConversation):
          self.prompt = None
          self.generated_images: ImagePreview = None
          self.task: dict = None
@@ -3867,7 +3883,7 @@ index 36d75ec..1ad5709 100644
  
  
  def get_cookies(
-@@ -1254,7 +4233,7 @@ def get_cookies(
+@@ -1254,7 +4248,7 @@ def get_cookies(
      return {c["name"]: c["value"] for c in json['cookies']} if 'cookies' in json else {}
  
  
@@ -3876,7 +3892,7 @@ index 36d75ec..1ad5709 100644
      list: List[Dict[str, str]]
  
      def __init__(self, sources: List[Dict[str, str]]) -> None:
-@@ -1294,8 +4273,7 @@ class OpenAISources(ResponseType):
+@@ -1294,8 +4288,7 @@ class OpenAISources(ResponseType):
          return "\n\n\n\n" + ("\n>\n".join([
              f"> [{idx + 1}] {format_link(link['url'], link.get('title', ''))}"
              for idx, link in enumerate(self.list)
@@ -3886,7 +3902,7 @@ index 36d75ec..1ad5709 100644
      def get_ref_info(self, source: Dict[str, str]) -> dict[str, str | int] | None:
          ref_index = source.get("ref_id", {}).get("ref_index", None)
          ref_type = source.get("ref_id", {}).get("ref_type", None)
-@@ -1345,9 +4323,25 @@ class ContentReferences:
+@@ -1345,9 +4338,25 @@ class ContentReferences:
          self.list: List[Dict[str, Any]] = []
  
      def add_reference(self, reference_part: dict) -> None:
@@ -3913,7 +3929,7 @@ index 36d75ec..1ad5709 100644
          while len(self.list) <= idx:
              self.list.append({})
  
-@@ -1357,25 +4351,34 @@ class ContentReferences:
+@@ -1357,25 +4366,34 @@ class ContentReferences:
          while len(self.list) <= idx:
              self.list.append({})
  

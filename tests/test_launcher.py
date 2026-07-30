@@ -422,6 +422,14 @@ def test_gpt4free_overlay_tracks_official_image_delta_and_conversation() -> None
         " = copy("
         in overlay
     )
+    assert (
+        '+                task_conversation_id = conversation.task.get("conversation_id")'
+        in overlay
+    )
+    assert (
+        "+                    conversation.conversation_id = task_conversation_id"
+        in overlay
+    )
 
 
 def test_gpt4free_overlay_runs_independent_preflight_requests_in_parallel() -> None:
