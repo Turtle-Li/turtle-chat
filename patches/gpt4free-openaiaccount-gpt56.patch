@@ -3742,13 +3742,13 @@ index 36d75ec..c8f3bb9 100644
 +            )
 +            if (
 +                error_message == "Error in message stream"
-+                and fields.task
++                and (fields.task or fields.handoff_topic)
 +            ):
-+                # ChatGPT can close the foreground message stream after it has
-+                # accepted an asynchronous image-generation task.  The task is
-+                # still authoritative and wait_media() below can retrieve its
-+                # completed assets without replaying (and double-charging) the
-+                # generation request.
++                # ChatGPT can close the foreground SSE after it has accepted
++                # an asynchronous image task or handed the turn to its
++                # WebSocket.  The task/handoff remains authoritative, so let
++                # the existing continuation path retrieve the result without
++                # replaying (and double-charging) the generation request.
 +                return
 +            raise RuntimeError(error)
  

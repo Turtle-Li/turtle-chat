@@ -153,3 +153,25 @@ def test_openai_account_normalizes_streamed_quota_errors() -> None:
             )
 
     asyncio.run(exercise())
+
+
+@requires_runtime
+def test_openai_account_continues_handoff_after_generic_sse_error() -> None:
+    class DummyConversation:
+        p = None
+        task = None
+        handoff_topic = "conversation-turn-safe-topic"
+
+    async def exercise() -> None:
+        iterator = OpenaiChat.iter_messages_line(
+            None,
+            None,
+            b'data: {"error":"Error in message stream"}',
+            DummyConversation(),
+            None,
+            None,
+        )
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+
+    asyncio.run(exercise())

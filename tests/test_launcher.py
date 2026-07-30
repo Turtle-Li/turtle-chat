@@ -248,7 +248,7 @@ def test_gpt4free_overlay_recovers_accepted_image_task_after_stream_error() -> N
     ).read_text(encoding="utf-8")
 
     assert '+                error_message == "Error in message stream"' in overlay
-    assert "+                and fields.task" in overlay
+    assert "+                and (fields.task or fields.handoff_topic)" in overlay
     assert "+                return" in overlay
     assert '+                raise RuntimeError("ChatGPT image generation failed")' in overlay
 
