@@ -54,7 +54,7 @@ index 36d75ec..c8f3bb9 100644
  from ..openai.har_file import get_request_config
  from ..openai.har_file import RequestConfig, arkReq, arkose_url, start_url, conversation_url, backend_url, prepare_url, \
      backend_anon_url
-@@ -93,6 +112,1527 @@ UPLOAD_HEADERS = {
+@@ -93,6 +112,1530 @@ UPLOAD_HEADERS = {
  }
  
  ImagesCache: Dict[str, dict] = {}
@@ -1241,8 +1241,11 @@ index 36d75ec..c8f3bb9 100644
 +    seen_ids: set[str] = set()
 +    seen_urls: set[str] = set()
 +    for item in merge_media(media, messages):
-+        is_tuple = isinstance(item, tuple)
-+        source, *rest = item if is_tuple else (item,)
++        is_media_pair = (
++            isinstance(item, (tuple, list))
++            and len(item) >= 1
++        )
++        source, *rest = item if is_media_pair else (item,)
 +        managed = (
 +            source
 +            if (
@@ -1265,7 +1268,7 @@ index 36d75ec..c8f3bb9 100644
 +            seen_ids.add(media_id)
 +        if primary_url:
 +            seen_urls.add(primary_url)
-+        yield (normalized, *rest) if is_tuple else normalized
++        yield (normalized, *rest) if is_media_pair else normalized
 +
 +
 +def _visible_progress_text(value: Any, *, limit: int = 180) -> str | None:
