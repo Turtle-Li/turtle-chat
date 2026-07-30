@@ -77,6 +77,7 @@ class ProjectFileScopeTests(unittest.IsolatedAsyncioTestCase):
         *,
         body: bytes = b"",
         content_type: str | None = None,
+        external_prefix: str | None = None,
     ) -> Request:
         delivered = False
 
@@ -90,6 +91,13 @@ class ProjectFileScopeTests(unittest.IsolatedAsyncioTestCase):
         headers = []
         if content_type:
             headers.append((b"content-type", content_type.encode("ascii")))
+        if external_prefix:
+            headers.append(
+                (
+                    b"x-turtle-project-external-prefix",
+                    external_prefix.encode("ascii"),
+                )
+            )
         if body:
             headers.append((b"content-length", str(len(body)).encode("ascii")))
         return Request(
@@ -226,6 +234,10 @@ class ProjectFileScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reservation["bytes"], 2048)
         self.assertEqual(reservation["purpose"], "vision")
         self.assertEqual(reservation["status"], "uploading")
+        self.assertEqual(
+            reservation["complete_url"],
+            f"/api/project/v1/files/{reservation['id']}/complete",
+        )
         self.assertTrue(reservation["upload"]["url"].startswith("https://bucket.cos.example/"))
         file_id = reservation["id"].removeprefix("file-")
         self.created_ids.append(file_id)
@@ -267,6 +279,20 @@ class ProjectFileScopeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(deleted["deleted"])
         delete_object.assert_called_once()
         self.assertIsNone(await Files.get_file_by_id(file_id, db=self.db))
+
+    async def test_direct_edge_prefix_is_used_only_for_the_allowlisted_value(self):
+        from .router import _project_api_external_prefix
+
+        self.assertEqual(
+            _project_api_external_prefix(self.request(external_prefix="/v1")),
+            "/v1",
+        )
+        self.assertEqual(
+            _project_api_external_prefix(
+                self.request(external_prefix="/api/v1/turtle/admin")
+            ),
+            "/api/project/v1",
+        )
 
 
 if __name__ == "__main__":

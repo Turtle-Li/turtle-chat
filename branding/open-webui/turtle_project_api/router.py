@@ -147,6 +147,13 @@ def _project_error(
     )
 
 
+def _project_api_external_prefix(request: Request) -> str:
+    """Return the allowlisted public prefix selected by the trusted edge."""
+    if request.headers.get("x-turtle-project-external-prefix") == "/v1":
+        return "/v1"
+    return "/api/project/v1"
+
+
 def _http_error_response(exc: HTTPException) -> JSONResponse:
     detail = exc.detail
     if isinstance(detail, dict):
@@ -497,7 +504,8 @@ async def create_project_file(
                 "expires_in": ticket["expires_in"],
             },
             "complete_url": (
-                f"/api/project/v1/files/{public_file_id(file.id)}/complete"
+                f"{_project_api_external_prefix(request)}/files/"
+                f"{public_file_id(file.id)}/complete"
             ),
         }
     )

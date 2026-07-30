@@ -11,4 +11,30 @@ chat.turtleligpt.com {
 		reverse_proxy 172.18.0.1:33010
 	}
 }
+
+api.chat.turtleligpt.com {
+	@project_api path /v1/*
+	handle @project_api {
+		header {
+			Cache-Control "no-store"
+			X-Content-Type-Options "nosniff"
+		}
+
+		reverse_proxy 172.18.0.1:33010 {
+			header_up Host api.chat.turtleligpt.com
+			header_up X-Turtle-Direct-Client-IP {remote_host}
+			header_up Accept-Encoding identity
+			flush_interval -1
+		}
+	}
+
+	handle {
+		header {
+			Cache-Control "no-store"
+			Content-Type "application/json"
+			X-Content-Type-Options "nosniff"
+		}
+		respond `{"error":{"message":"Not found","type":"invalid_request_error"}}` 404
+	}
+}
 # END TURTLE-GPT MANAGED SITE
