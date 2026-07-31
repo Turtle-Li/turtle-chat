@@ -17,10 +17,14 @@ try:
     client_module = importlib.import_module("g4f.client")
     Images = client_module.Images
     MediaResponse = client_module.MediaResponse
+    PreTaskMediaError = importlib.import_module(
+        "g4f.errors"
+    ).PreTaskMediaError
 except ModuleNotFoundError as exc:
     client_module = None
     Images = None
     MediaResponse = None
+    PreTaskMediaError = None
     RUNTIME_IMPORT_ERROR = exc
 
 
@@ -35,6 +39,7 @@ class FakeOpenaiAccount:
     attempts = 0
     fail_attempts = 1
     error_message = "Error in message stream"
+    error_type: type[Exception] = RuntimeError
     task_lock: asyncio.Lock | None = None
 
     @classmethod
@@ -44,11 +49,13 @@ class FakeOpenaiAccount:
         *,
         fail_attempts: int = 1,
         error_message: str = "Error in message stream",
+        error_type: type[Exception] = RuntimeError,
     ) -> None:
         cls.quotas = list(quotas)
         cls.attempts = 0
         cls.fail_attempts = fail_attempts
         cls.error_message = error_message
+        cls.error_type = error_type
         cls.task_lock = None
 
     @classmethod
@@ -65,7 +72,7 @@ class FakeOpenaiAccount:
     async def create_async_generator(cls, *_args, **_kwargs):
         cls.attempts += 1
         if cls.attempts <= cls.fail_attempts:
-            raise RuntimeError(cls.error_message)
+            raise cls.error_type(cls.error_message)
         yield MediaResponse(
             ["https://example.invalid/generated.png"],
             "generated",
@@ -155,3 +162,27 @@ def test_fails_closed_when_retry_confirmation_quota_is_unavailable(
         asyncio.run(generate())
 
     assert FakeOpenaiAccount.attempts == 1
+
+
+@requires_runtime
+def test_pre_task_upload_failure_skips_post_task_quota_and_generation_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenaiAccount.reset(
+        [{"remaining": 10, "blocked": False}],
+        error_message="image input upload failed before task submission",
+        error_type=PreTaskMediaError,
+    )
+
+    async def unexpected_sleep(_seconds: float) -> None:
+        pytest.fail("pre-task upload failure must not enter task retry grace")
+
+    monkeypatch.setattr(client_module.asyncio, "sleep", unexpected_sleep)
+    with pytest.raises(
+        PreTaskMediaError,
+        match="image input upload failed before task submission",
+    ):
+        asyncio.run(generate())
+
+    assert FakeOpenaiAccount.attempts == 1
+    assert FakeOpenaiAccount.quotas == []

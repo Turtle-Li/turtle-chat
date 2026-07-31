@@ -34,6 +34,7 @@ from g4f.Provider.openai.media_pump import (  # noqa: E402
     MODEL_SOURCE_CONTEXT,
     MODEL_INPUT_MAX_BYTES,
     MediaPumpError,
+    MediaPumpRequestError,
     ModelMediaSource,
     _post_sync,
     model_source_metadata,
@@ -99,11 +100,12 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, *, post_payloads: list[dict] | None = None):
+    def __init__(self, *, post_payloads: list[dict | tuple[int, dict]] | None = None):
         self.cookie_jar = []
         self.post_payloads = list(post_payloads or [])
         self.get_count = 0
         self.post_count = 0
+        self.deleted_ids: list[str] = []
 
     def get(self, _url, **_kwargs):
         self.get_count += 1
@@ -111,7 +113,15 @@ class FakeSession:
 
     def post(self, _url, **_kwargs):
         self.post_count += 1
-        return FakeResponse(self.post_payloads.pop(0))
+        response = self.post_payloads.pop(0)
+        if isinstance(response, tuple):
+            status, payload = response
+            return FakeResponse(payload, status=status)
+        return FakeResponse(response)
+
+    def delete(self, url, **_kwargs):
+        self.deleted_ids.append(str(url).rsplit("/", 1)[-1])
+        return FakeResponse({}, status=204)
 
 
 class ConcurrentFakeSession:
@@ -119,6 +129,7 @@ class ConcurrentFakeSession:
         self.cookie_jar = []
         self.create_count = 0
         self.confirm_count = 0
+        self.deleted_ids: list[str] = []
 
     def post(self, url, **kwargs):
         if str(url).endswith("/backend-api/files"):
@@ -136,6 +147,10 @@ class ConcurrentFakeSession:
         return FakeResponse(
             {"download_url": f"https://oaiusercontent.example/{file_id}/download"}
         )
+
+    def delete(self, url, **_kwargs):
+        self.deleted_ids.append(str(url).rsplit("/", 1)[-1])
+        return FakeResponse({}, status=204)
 
 
 class FakeControlResponse:
@@ -426,6 +441,308 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.turtle_media_metrics["retry_count"], 2)
         self.assertEqual(conversation.turtle_media_metrics["transfer_bytes"], 4)
         self.assertNotIn(PRIVATE_INPUT_FILE_CACHE_ATTR, conversation.get_dict())
+
+    async def test_transient_file_create_failure_retries_before_transfer(self):
+        source = open_model_source(
+            sealed_image_url(
+                media={
+                    "size": 4,
+                    "content_type": "image/png",
+                    "width": 1,
+                    "height": 1,
+                }
+            )
+        )
+        conversation = Conversation(user_id=None)
+        conversation.turtle_media_metrics = _new_media_metrics()
+        session = FakeSession(
+            post_payloads=[
+                (500, {}),
+                {
+                    "file_id": "file_retry_create",
+                    "upload_url": "https://oaiusercontent.example/upload-target",
+                },
+                {"download_url": "https://oaiusercontent.example/download"},
+            ]
+        )
+        transfer = AsyncMock(
+            return_value={
+                "size": 4,
+                "source": "primary",
+                "cdn_cache": "hit",
+                "retry_count": 0,
+            }
+        )
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=transfer,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            uploaded = await OpenaiChat.upload_files(
+                session,
+                self.auth,
+                [source],
+                conversation,
+            )
+
+        self.assertEqual(uploaded[0].get("file_id"), "file_retry_create")
+        self.assertEqual(session.post_count, 3)
+        self.assertEqual(transfer.await_count, 1)
+        self.assertEqual(conversation.turtle_media_metrics["retry_count"], 1)
+        self.assertEqual(session.deleted_ids, [])
+
+    async def test_exhausted_504_stays_a_pre_task_file_control_failure(self):
+        source = open_model_source(
+            sealed_image_url(
+                media={
+                    "size": 4,
+                    "content_type": "image/png",
+                    "width": 1,
+                    "height": 1,
+                }
+            )
+        )
+        conversation = Conversation(user_id=None)
+        conversation.turtle_media_metrics = _new_media_metrics()
+        session = FakeSession(
+            post_payloads=[(504, {}), (504, {}), (504, {})]
+        )
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                MediaPumpError,
+                "ChatGPT file control temporarily unavailable",
+            ):
+                await OpenaiChat.upload_files(
+                    session,
+                    self.auth,
+                    [source],
+                    conversation,
+                )
+
+        self.assertEqual(session.post_count, 3)
+        self.assertEqual(conversation.turtle_media_metrics["retry_count"], 2)
+        self.assertEqual(session.deleted_ids, [])
+
+    async def test_destination_failure_retries_same_managed_transfer(self):
+        source = open_model_source(
+            sealed_image_url(
+                media={
+                    "size": 4,
+                    "content_type": "image/png",
+                    "width": 1,
+                    "height": 1,
+                }
+            )
+        )
+        conversation = Conversation(user_id=None)
+        conversation.turtle_media_metrics = _new_media_metrics()
+        session = FakeSession(
+            post_payloads=[
+                {
+                    "file_id": "file_retry_transfer",
+                    "upload_url": "https://oaiusercontent.example/upload-target",
+                },
+                {"download_url": "https://oaiusercontent.example/download"},
+            ]
+        )
+        transfer = AsyncMock(
+            side_effect=[
+                MediaPumpRequestError(
+                    status=502,
+                    code="destination_upload_failed",
+                    phase="destination",
+                    source="primary",
+                    retryable=False,
+                    structured=True,
+                ),
+                {
+                    "size": 4,
+                    "source": "primary",
+                    "cdn_cache": "hit",
+                    "retry_count": 0,
+                },
+            ]
+        )
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=transfer,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            uploaded = await OpenaiChat.upload_files(
+                session,
+                self.auth,
+                [source],
+                conversation,
+            )
+
+        self.assertEqual(uploaded[0].get("file_id"), "file_retry_transfer")
+        self.assertEqual(transfer.await_count, 2)
+        self.assertEqual(conversation.turtle_media_metrics["retry_count"], 1)
+        self.assertEqual(session.deleted_ids, [])
+
+    async def test_final_destination_failure_cleans_new_file_and_cache(self):
+        source = open_model_source(
+            sealed_image_url(
+                media={
+                    "size": 4,
+                    "content_type": "image/png",
+                    "width": 1,
+                    "height": 1,
+                }
+            )
+        )
+        conversation = Conversation(user_id=None)
+        conversation.turtle_media_metrics = _new_media_metrics()
+        session = FakeSession(
+            post_payloads=[
+                {
+                    "file_id": "file_failed_transfer",
+                    "upload_url": "https://oaiusercontent.example/upload-target",
+                }
+            ]
+        )
+
+        def destination_failure(**_kwargs):
+            raise MediaPumpRequestError(
+                status=502,
+                code="destination_upload_failed",
+                phase="destination",
+                source="primary",
+                retryable=False,
+                structured=True,
+            )
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=AsyncMock(side_effect=destination_failure),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            with self.assertRaises(MediaPumpRequestError):
+                await OpenaiChat.upload_files(
+                    session,
+                    self.auth,
+                    [source],
+                    conversation,
+                )
+
+        self.assertEqual(session.deleted_ids, ["file_failed_transfer"])
+        self.assertNotIn(
+            _private_input_file_cache_key(source),
+            getattr(conversation, PRIVATE_INPUT_FILE_CACHE_ATTR),
+        )
+        self.assertEqual(conversation.turtle_media_metrics["retry_count"], 1)
+
+    async def test_partial_batch_failure_cleans_every_new_sibling_file(self):
+        sources = [
+            ModelMediaSource(
+                "https://files.chat.totools.cn/"
+                f"turtle-gpt/files/users/user-a/batch-{index}.png",
+                media_id=f"{index:064x}",
+            )
+            for index in range(2)
+        ]
+        conversation = Conversation(user_id=None)
+        session = ConcurrentFakeSession()
+
+        async def transfer(*, source, **_kwargs):
+            if source.primary_url.endswith("batch-1.png"):
+                raise MediaPumpRequestError(
+                    status=502,
+                    code="destination_upload_failed",
+                    phase="destination",
+                    source="primary",
+                    retryable=False,
+                    structured=True,
+                )
+            return {
+                "size": 4,
+                "source": "primary",
+                "cdn_cache": "hit",
+                "retry_count": 0,
+            }
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.probe_media",
+                new=AsyncMock(
+                    return_value={
+                        "size": 4,
+                        "content_type": "image/png",
+                        "max_bytes": 1024,
+                        "source": "primary",
+                        "cdn_cache": "hit",
+                        "retry_count": 0,
+                    }
+                ),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.transfer_media",
+                new=transfer,
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.asyncio.sleep",
+                new=AsyncMock(),
+            ),
+        ):
+            with self.assertRaises(MediaPumpRequestError):
+                await OpenaiChat.upload_files(
+                    session,
+                    self.auth,
+                    [
+                        (source, f"batch-{index}.png")
+                        for index, source in enumerate(sources)
+                    ],
+                    conversation,
+                )
+
+        self.assertEqual(len(set(session.deleted_ids)), 2)
+        self.assertEqual(
+            getattr(conversation, PRIVATE_INPUT_FILE_CACHE_ATTR),
+            {},
+        )
 
     async def test_verified_source_metadata_skips_probe_before_transfer(self):
         source = open_model_source(

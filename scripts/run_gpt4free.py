@@ -11,6 +11,7 @@ OVERLAY_FILES = {
     "g4f/api/__init__.py",
     "g4f/api/stubs.py",
     "g4f/client/__init__.py",
+    "g4f/errors.py",
     "g4f/Provider/openai/models.py",
     "g4f/Provider/needs_auth/OpenaiChat.py",
     "g4f/Provider/openai/media_pump.py",

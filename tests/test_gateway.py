@@ -1008,6 +1008,155 @@ def test_image_generation_allows_plus_request_to_overflow_into_pro_profile() -> 
     assert calls == 1
 
 
+def test_image_pre_task_upload_failure_fails_over_without_charging_first_account() -> None:
+    hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hosts.append(str(request.url.host))
+        if request.url.host == "upstream.test":
+            return httpx.Response(
+                425,
+                json={
+                    "error": {
+                        "message": (
+                            "image input upload failed before task submission"
+                        )
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"url": "https://media.example.test/generated.png"}
+                ]
+            },
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        store = client.app.state.account_pool.store
+        store.accounts["legacy-primary"]["quota_profile"] = "plus"
+        add_memory_backup_account(client)
+        response = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "one product concept",
+                "n": 1,
+                "response_format": "url",
+                "turtle_user_id": "user-image-failover",
+                "turtle_chat_id": "chat-image-failover",
+                "turtle_request_id": "img-pre-task-failover",
+                "turtle_required_quota_profiles": ["plus"],
+            },
+        )
+        snapshot = client.get(
+            "/internal/account-pools",
+            headers=headers(),
+        ).json()
+        first_lease = dict(store.leases["img-pre-task-failover-1"])
+        affinity = dict(
+            store.affinity[("gpt-default", "chat-image-failover")]
+        )
+
+    assert response.status_code == 200
+    assert hosts == ["upstream.test", "backup.test"]
+    assert first_lease["outcome"] == "error"
+    assert first_lease["error_class"] == "failover_pre_task"
+    assert affinity["preferred_account_id"] == "backup-account"
+    assert affinity["last_migration_reason"] == "failover_pre_task"
+    primary = next(
+        item
+        for item in snapshot["accounts"]
+        if item["id"] == "legacy-primary"
+    )
+    backup = next(
+        item
+        for item in snapshot["accounts"]
+        if item["id"] == "backup-account"
+    )
+    primary_lane = next(
+        item
+        for item in primary["quota"]["lanes"]
+        if item["selection_key"] == "image:create"
+    )
+    backup_lane = next(
+        item
+        for item in backup["quota"]["lanes"]
+        if item["selection_key"] == "image:create"
+    )
+    assert primary_lane["used_count"] == 0
+    assert backup_lane["used_count"] == 1
+
+
+def test_image_pre_task_upload_failure_exhaustion_returns_clear_error() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            425,
+            json={
+                "error": {
+                    "message": (
+                        "image input upload failed before task submission"
+                    )
+                }
+            },
+        )
+
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        client.app.state.account_pool.store.accounts["legacy-primary"][
+            "quota_profile"
+        ] = "plus"
+        response = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "one product concept",
+                "n": 1,
+                "response_format": "url",
+                "turtle_user_id": "user-image-exhausted",
+                "turtle_request_id": "img-pre-task-exhausted",
+                "turtle_required_quota_profiles": ["plus"],
+            },
+        )
+        snapshot = client.get(
+            "/internal/account-pools",
+            headers=headers(),
+        ).json()
+
+    assert response.status_code == 503
+    assert response.json()["error"]["message"] == (
+        "上游参考图上传暂时失败，请稍后重试"
+    )
+    assert calls == 1
+    account = next(
+        item
+        for item in snapshot["accounts"]
+        if item["id"] == "legacy-primary"
+    )
+    lane = next(
+        item
+        for item in account["quota"]["lanes"]
+        if item["selection_key"] == "image:create"
+    )
+    assert lane["used_count"] == 0
+
+
 def test_empty_image_task_preserves_official_consumption_without_replay() -> None:
     calls = 0
 

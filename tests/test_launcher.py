@@ -356,6 +356,7 @@ def test_gpt4free_overlay_seals_only_exact_sandbox_zip_downloads() -> None:
     assert "+        await asyncio.sleep(min(0.5 * (2 ** attempt), 5.0))" in overlay
     assert "diff --git a/g4f/client/__init__.py b/g4f/client/__init__.py" in overlay
     assert "g4f/client/__init__.py" in LAUNCHER_MODULE.OVERLAY_FILES
+    assert "g4f/errors.py" in LAUNCHER_MODULE.OVERLAY_FILES
     assert "g4f/client/stubs.py" in LAUNCHER_MODULE.OVERLAY_FILES
     assert "g4f/api/stubs.py" in LAUNCHER_MODULE.OVERLAY_FILES
     assert "g4f/providers/tool_support.py" in LAUNCHER_MODULE.OVERLAY_FILES
@@ -510,7 +511,7 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert '+PRIVATE_INPUT_FILE_CACHE_ATTR = "__turtle_input_file_cache"' in overlay
     assert '+                        f"{cls.url}/backend-api/files/{cached[\'file_id\']}/download",' in overlay
     assert '+                                metrics["file_cache_hit"] += 1' in overlay
-    assert "transfer = await transfer_media(" in overlay
+    assert "transfer = await transfer_managed_source(" in overlay
     assert (
         "+        prepare_semaphore = asyncio.Semaphore(configured_prepare_parallel)"
         in overlay
@@ -541,6 +542,24 @@ def test_gpt4free_overlay_reuses_verified_model_files_and_tracks_cdn_delivery() 
     assert "+                        self.turtle_input_file_caches.pop(resource_id, None)" in overlay
     assert "TURTLE_MEDIA_PREPARE_CONCURRENCY" in LAUNCHER_MODULE.ALLOWED_ENV_NAMES
     assert "TURTLE_MEDIA_UPLOAD_CONCURRENCY" in LAUNCHER_MODULE.ALLOWED_ENV_NAMES
+
+
+def test_gpt4free_overlay_recovers_image_uploads_before_task_submission() -> None:
+    overlay = (
+        LAUNCHER_PATH.parents[1]
+        / "patches/gpt4free-openaiaccount-gpt56.patch"
+    ).read_text(encoding="utf-8")
+
+    assert '+class PreTaskMediaError(G4FError):' in overlay
+    assert '+        concurrency = int(os.getenv("TURTLE_MEDIA_PREPARE_CONCURRENCY", "3"))' in overlay
+    assert '+                print("turtle_media_control_retry=1", flush=True)' in overlay
+    assert '+                    print("turtle_media_destination_retry=1", flush=True)' in overlay
+    assert '+                    print("turtle_image_pre_task_failure=1", flush=True)' in overlay
+    assert '+                except PreTaskMediaError:' in overlay
+    assert '+            except PreTaskMediaError:' in overlay
+    assert '+                    425,' in overlay
+    assert '+            except RateLimitError as e:' in overlay
+    assert '+                    HTTP_429_TOO_MANY_REQUESTS,' in overlay
 
 
 def test_gpt4free_overlay_has_versioned_handoff_latency_metrics() -> None:

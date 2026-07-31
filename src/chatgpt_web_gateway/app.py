@@ -357,6 +357,14 @@ def _safe_failover_reason(status_code: int) -> str | None:
     return None
 
 
+def _safe_image_failover_reason(status_code: int) -> str | None:
+    """Add the image-only pre-task failure proof to safe failover states."""
+
+    if status_code == 425:
+        return "failover_pre_task"
+    return _safe_failover_reason(status_code)
+
+
 def _attempt_request_id(request_id: str, attempt_no: int) -> str:
     if attempt_no <= 1:
         return request_id
@@ -1638,6 +1646,7 @@ def create_app(
         total_image_units = 0
         last_failure: tuple[int, str] | None = None
         total_attempts = 0
+        migration_reason_hint = "image_profile_route"
         logger.info(
             "image_request_route id=%s official_tasks=1 chat_bound=%s profiles=%s references=%s",
             request_id,
@@ -1662,10 +1671,11 @@ def create_app(
                     selection_key="image:create",
                     excluded_account_ids=frozenset(attempted_account_ids),
                     required_quota_profiles=required_profiles,
-                    migration_reason_hint="image_profile_route",
+                    migration_reason_hint=migration_reason_hint,
                 )
             except AccountUnavailable as exc:
-                last_failure = (503, str(exc))
+                if last_failure is None:
+                    last_failure = (503, str(exc))
                 break
             attempted_account_ids.add(account_lease.account.id)
             payload = dict(upstream_payload)
@@ -1721,7 +1731,7 @@ def create_app(
                 )
                 raise
             except UpstreamFailure as exc:
-                failover_reason = _safe_failover_reason(exc.status_code)
+                failover_reason = _safe_image_failover_reason(exc.status_code)
                 consumed = (
                     attempt_usage is not None
                     and attempt_usage.get("source")
@@ -1738,8 +1748,13 @@ def create_app(
                         else 1
                     ),
                 )
-                last_failure = (exc.status_code, exc.message)
+                last_failure = (
+                    (503, "上游参考图上传暂时失败，请稍后重试")
+                    if failover_reason == "failover_pre_task"
+                    else (exc.status_code, exc.message)
+                )
                 if failover_reason is not None:
+                    migration_reason_hint = failover_reason
                     logger.warning(
                         "image_request_failover id=%s attempt=%d account=%s reason=%s status=%d",
                         request_id,
