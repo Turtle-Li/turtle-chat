@@ -24,6 +24,12 @@
   const DIRECT_UPLOAD_TRANSFER_CONCURRENCY = 3;
   const DIRECT_UPLOAD_RETRY_DELAYS_MS = [0, 350, 1_000];
   const DEFERRED_UPLOAD_MAX_AGE_MS = 30 * 60 * 1_000;
+  const modelStageSessionId = (() => {
+    const random = crypto.randomUUID?.().replaceAll("-", "");
+    if (random) return random;
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  })();
   const previewObjectUrls = new Set();
   const deferredUploadObjectUrls = new Set();
   const mediaUrlCache = new Map();
@@ -575,6 +581,24 @@
         signal: options.signal,
       });
       if (!complete.ok) throw new Error(await errorMessage(complete, "COS 文件校验失败"));
+      options.onStored?.(ticket.file_id);
+      if (file.type.startsWith("image/") && options.modelStageSessionId) {
+        try {
+          const stage = await apiFetch(`/uploads/${encodeURIComponent(ticket.file_id)}/model-stage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              stage_session_id: options.modelStageSessionId,
+              ...(options.chatId ? { chat_id: options.chatId } : {}),
+            }),
+            signal: options.signal,
+          });
+          options.onStage?.(stage.ok);
+        } catch (error) {
+          if (options.signal?.aborted || error?.name === "AbortError") throw error;
+          options.onStage?.(false);
+        }
+      }
       options.onComplete?.(ticket.file_id);
       invalidateSpaceData();
       return complete;
@@ -638,12 +662,15 @@
       deferredUploadObjectUrls.add(task.previewUrl);
     }
     if (task.previewUrl && !wrapper.querySelector("[data-turtle-deferred-upload-preview]")) {
+      const previewShell = document.createElement("span");
+      previewShell.dataset.turtleDeferredUploadPreview = "";
       const preview = document.createElement("img");
-      preview.dataset.turtleDeferredUploadPreview = "";
+      preview.dataset.turtleDeferredUploadPreviewImage = "";
       preview.src = task.previewUrl;
       preview.alt = "";
       preview.setAttribute("aria-hidden", "true");
-      wrapper.prepend(preview);
+      previewShell.append(preview);
+      wrapper.prepend(previewShell);
       wrapper.classList.add("turtle-deferred-upload-has-preview");
     }
   };
@@ -717,7 +744,7 @@
 
   const cancelDeferredUpload = (task) => {
     if (!task || task.cancelled || ["completed", "failed"].includes(task.state)) return;
-    const completedFileId = task.state === "settling" ? task.fileId : "";
+    const completedFileId = task.storageCompleted ? task.fileId : "";
     task.cancelled = true;
     task.state = "cancelled";
     task.abortController.abort();
@@ -931,6 +958,7 @@
       cancelled: false,
       released: false,
       fileId: "",
+      storageCompleted: false,
       abortController: new AbortController(),
       release: () => {},
       done: null,
@@ -949,6 +977,7 @@
     }
 
     deferredComposerUploads.set(task.id, task);
+    task.release();
     queueDeferredUploadPreviewScan();
     task.done = (async () => {
       try {
@@ -965,8 +994,15 @@
         const compressedForm = replaceFormFile(form, file, file !== originalFile);
         const response = await directUpload(file, compressedForm, task.prepared.thumbnail, {
           signal: task.abortController.signal,
+          modelStageSessionId,
+          chatId: window.location.pathname.match(/^\/c\/([^/?#]+)/)?.[1] || "",
           onReservation: (fileId) => {
             task.fileId = fileId;
+          },
+          onStored: () => {
+            task.storageCompleted = true;
+            task.state = "staging";
+            queueDeferredUploadPreviewScan();
           },
         });
         if (task.cancelled) return cancelledUploadResponse();

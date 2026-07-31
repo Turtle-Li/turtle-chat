@@ -283,6 +283,7 @@ class PostgresUpstreamCleanupStore:
         user_id: str | None,
         chat_id: str | None,
         metadata: UpstreamResourceMetadata,
+        ttl_seconds: int | None = None,
     ) -> int:
         resources: list[tuple[str, str]] = []
         if metadata.conversation_id:
@@ -299,7 +300,12 @@ class PostgresUpstreamCleanupStore:
         if not resources:
             return 0
         now = int(time.time())
-        delete_after = now + self.ttl_seconds
+        retention_seconds = (
+            self.ttl_seconds
+            if ttl_seconds is None
+            else max(60, min(self.ttl_seconds, int(ttl_seconds)))
+        )
+        delete_after = now + retention_seconds
         with self._connect() as connection, connection.cursor() as cursor:
             for resource_type, resource_id in resources:
                 cursor.execute(
@@ -610,6 +616,7 @@ class UpstreamCleanupManager:
         user_id: str | None,
         chat_id: str | None,
         metadata: UpstreamResourceMetadata,
+        ttl_seconds: int | None = None,
     ) -> int:
         if not self.enabled or self.store is None or metadata.empty:
             return 0
@@ -621,6 +628,7 @@ class UpstreamCleanupManager:
                 user_id=user_id,
                 chat_id=chat_id,
                 metadata=metadata,
+                ttl_seconds=ttl_seconds,
             )
         except Exception:
             logger.exception(

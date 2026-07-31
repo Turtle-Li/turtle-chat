@@ -174,6 +174,7 @@ class AccountStore(Protocol):
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
         required_quota_profiles: frozenset[str] = frozenset(),
+        required_account_id: str | None = None,
         migration_reason_hint: str | None = None,
     ) -> UpstreamAccount: ...
 
@@ -913,6 +914,7 @@ class MemoryAccountStore:
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
         required_quota_profiles: frozenset[str] = frozenset(),
+        required_account_id: str | None = None,
         migration_reason_hint: str | None = None,
     ) -> UpstreamAccount:
         with self._lock:
@@ -953,6 +955,10 @@ class MemoryAccountStore:
                 item["active"] = active_by_account[value["id"]]
                 item["base_eligible"] = (
                     str(item["id"]) not in excluded_account_ids
+                    and (
+                        required_account_id is None
+                        or str(item["id"]) == str(required_account_id)
+                    )
                     and (
                         not required_quota_profiles
                         or str(item.get("quota_profile") or "untracked")
@@ -1049,7 +1055,7 @@ class MemoryAccountStore:
             lease.update(
                 state=(
                     "completed"
-                    if outcome in {"success", "upstream_consumed"}
+                    if outcome in {"success", "upstream_consumed", "prefetched"}
                     else "cancelled"
                     if outcome == "cancelled"
                     else "failed"
@@ -1492,7 +1498,7 @@ def _apply_account_result(
     cooldown_seconds: int,
     now: int,
 ) -> None:
-    if outcome in {"success", "cancelled"}:
+    if outcome in {"success", "cancelled", "prefetched", "prefetch_failed"}:
         if outcome == "success":
             account.update(
                 status="ready" if account.get("enabled") else "disabled",
@@ -2002,6 +2008,7 @@ class PostgresAccountStore:
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
         required_quota_profiles: frozenset[str] = frozenset(),
+        required_account_id: str | None = None,
         migration_reason_hint: str | None = None,
     ) -> UpstreamAccount:
         now = _now()
@@ -2105,6 +2112,10 @@ class PostgresAccountStore:
                     item["provider"] = provider
                     item["base_eligible"] = (
                         str(item["id"]) not in excluded_account_ids
+                        and (
+                            required_account_id is None
+                            or str(item["id"]) == str(required_account_id)
+                        )
                         and (
                             not required_quota_profiles
                             or str(item.get("quota_profile") or "untracked")
@@ -2246,7 +2257,7 @@ class PostgresAccountStore:
                     (
                         (
                             "completed"
-                            if outcome in {"success", "upstream_consumed"}
+                            if outcome in {"success", "upstream_consumed", "prefetched"}
                             else "cancelled"
                             if outcome == "cancelled"
                             else "failed"
@@ -3098,6 +3109,7 @@ class AccountPoolRouter:
         selection_key: str = "latest:medium",
         excluded_account_ids: frozenset[str] = frozenset(),
         required_quota_profiles: frozenset[str] = frozenset(),
+        required_account_id: str | None = None,
         migration_reason_hint: str | None = None,
     ) -> AccountLease:
         normalized_request_id = request_id if REQUEST_ID_RE.fullmatch(request_id) else uuid.uuid4().hex[:12]
@@ -3111,6 +3123,7 @@ class AccountPoolRouter:
             selection_key=selection_key,
             excluded_account_ids=excluded_account_ids,
             required_quota_profiles=required_quota_profiles,
+            required_account_id=required_account_id,
             migration_reason_hint=migration_reason_hint,
         )
         lease = AccountLease(self, normalized_request_id, account)

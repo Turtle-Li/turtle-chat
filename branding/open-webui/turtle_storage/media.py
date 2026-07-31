@@ -406,7 +406,27 @@ def get_presigned_model_image_source_for_file(file, user) -> dict | None:
         ),
         **media_metadata,
     )
-    return {"url": primary_url, "turtle_source": token}
+    result = {"url": primary_url, "turtle_source": token}
+    stage = meta.get("turtle_model_stage")
+    if (
+        isinstance(stage, dict)
+        and stage.get("v") == 1
+        and stage.get("media_id") == str(file.id)
+        and isinstance(stage.get("expires_at"), int)
+        and not isinstance(stage.get("expires_at"), bool)
+        and stage["expires_at"] > int(time.time())
+        and re.fullmatch(
+            r"[A-Za-z0-9_-]{32,128}",
+            str(stage.get("token") or ""),
+        )
+    ):
+        result.update(
+            {
+                "turtle_media_id": str(file.id),
+                "turtle_stage_token": stage["token"],
+            }
+        )
+    return result
 
 
 def _generated_name(url: str, content_type: str, filename_hint: str | None = None) -> str:

@@ -41,7 +41,7 @@ def test_multi_image_client_pipeline_keeps_control_plane_outside_body_limiter() 
     )
 
 
-def test_composer_media_is_prepared_before_send_and_uploaded_only_after_release() -> None:
+def test_composer_media_upload_and_model_stage_start_when_the_file_is_selected() -> None:
     source = CONTROLS.read_text(encoding="utf-8")
     staged = source[
         source.index("const stageDeferredComposerUpload =")
@@ -52,6 +52,11 @@ def test_composer_media_is_prepared_before_send_and_uploaded_only_after_release(
     assert 'task.state = "prepared";' in staged
     assert "await gate;" in staged
     assert 'task.state = "uploading";' in staged
+    assert "task.release();" in staged
+    assert 'task.state = "staging";' in staged
+    assert "/model-stage`" in source
+    assert "modelStageSessionId" in staged
+    assert staged.index("task.release();") < staged.index("task.done =")
     assert staged.index("task.prepared = await preparation;") < staged.index("await gate;")
     assert staged.index("await gate;") < staged.index("await directUpload(")
     assert "return await stageDeferredComposerUpload({" in source
@@ -76,10 +81,10 @@ def test_deferred_media_flush_covers_button_enter_cancel_and_duplicate_send() ->
     assert "turtle-deferred-upload-status" in source
     assert "setDeferredUploadBusy(true, tasks);" in source
     assert 'status.setAttribute("role", "status");' in source
-    assert "#send-message-button[data-turtle-deferred-upload-busy=\"true\"]::after" in styles
-    assert "top: 50%;" in styles
-    assert "left: 50%;" in styles
-    assert "translate(-50%, -50%) rotate(360deg)" in styles
+    assert "[data-turtle-deferred-upload-preview]::after" in styles
+    assert 'data-turtle-deferred-upload-state="staging"' in styles
+    assert '#send-message-button[data-turtle-deferred-upload-busy="true"]::after {\n  display: none;' in styles
+    assert ".turtle-deferred-upload-status::before" in styles
 
 
 def test_direct_cos_upload_retries_only_transient_failures_with_a_small_bound() -> None:

@@ -233,6 +233,55 @@ class AccountPoolRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["pools"][0]["admission_capacity"], 1)
         self.assertEqual(snapshot["pools"][0]["available_slots"], 1)
 
+    async def test_required_account_pins_prefetch_without_consuming_lane_usage(self) -> None:
+        current = self.store.accounts["acct-a"]
+        await self.router.update_account(
+            "acct-a",
+            name=current["name"],
+            worker_endpoint=current["worker_endpoint"],
+            health_path=current["health_path"],
+            max_concurrency=current["max_concurrency"],
+            priority=current["priority"],
+            enabled=True,
+            quota_profile="plus",
+        )
+        secondary = await self.add_ready_account(quota_profile="plus")
+
+        pinned = await self.router.acquire(
+            pool_id="gpt-default",
+            request_id="request-prefetch-pinned",
+            user_id="user-a",
+            chat_id=None,
+            selection_key="image:create",
+            required_quota_profiles=frozenset({"plus"}),
+            required_account_id=secondary["id"],
+        )
+        self.assertEqual(pinned.account.id, secondary["id"])
+
+        with self.assertRaises(AccountUnavailable):
+            await self.router.acquire(
+                pool_id="gpt-default",
+                request_id="request-prefetch-busy",
+                user_id="user-b",
+                chat_id=None,
+                selection_key="image:create",
+                required_quota_profiles=frozenset({"plus"}),
+                required_account_id=secondary["id"],
+            )
+
+        await pinned.release(outcome="prefetched", status_code=200)
+        snapshot = await self.router.snapshot()
+        staged_account = next(
+            item for item in snapshot["accounts"] if item["id"] == secondary["id"]
+        )
+        image_lane = next(
+            item
+            for item in staged_account["quota"]["lanes"]
+            if item["selection_key"] == "image:create"
+        )
+        self.assertEqual(image_lane["used_count"], 0)
+        self.assertEqual(image_lane["active_count"], 0)
+
     async def test_probe_persists_only_the_upstream_display_name(self) -> None:
         result = await self.router.probe_account("acct-a")
         self.assertEqual(result["upstream_display_name"], "海龟 管理员")

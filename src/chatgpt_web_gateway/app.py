@@ -39,6 +39,7 @@ from .capabilities import (
     resolve_selection_key,
 )
 from .config import Settings
+from .image_stage import ImageStageRegistry
 from .login_control import (
     LoginControlClient,
     LoginControlError,
@@ -52,6 +53,7 @@ from .models import (
     AccountPoolForm,
     AccountSettingsForm,
     ChatCompletionRequest,
+    ImageMediaStageRequest,
     ImageGenerationRequest,
     ProjectApiKeyForm,
     ProjectApiCreditGrantForm,
@@ -93,6 +95,8 @@ _SEARCH_INTENT_RE = re.compile(
 _TURTLE_SOURCE_TOKEN_RE = re.compile(
     r"^[A-Za-z0-9_-]{20,48000}\.[A-Za-z0-9_-]{43}$"
 )
+_UPSTREAM_INPUT_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,160}$")
+_IMAGE_STAGE_CLEANUP_TTL_SECONDS = 60 * 60
 
 
 def _enforce_external_media(payload: dict[str, Any]) -> None:
@@ -691,6 +695,7 @@ def create_app(
             master_key=resolved.gateway_api_key,
             connection_pool=shared_database_pool,
         )
+        application.state.image_stages = ImageStageRegistry()
         await application.state.account_pool.start()
         await application.state.project_usage.start()
         await application.state.upstream_cleanup.start()
@@ -1578,6 +1583,184 @@ def create_app(
             "is_master": caller.is_master,
         }
 
+    @application.post("/internal/image-media/stage")
+    async def stage_image_media(
+        body: ImageMediaStageRequest,
+        request: Request,
+        caller: ProjectCaller = Depends(require_call_key),
+    ):
+        started = time.monotonic()
+        if not caller.is_master:
+            return _error(
+                403,
+                "项目 API 暂未开放参考图预上传",
+                "project_api_forbidden",
+            )
+        media_ids = {
+            str(item.turtle_media_id or "") for item in body.turtle_media
+        }
+        if "" in media_ids or len(media_ids) != len(body.turtle_media):
+            return _error(
+                400,
+                "参考图预上传缺少稳定媒体标识",
+                "invalid_request_error",
+            )
+        required_profiles = frozenset(body.turtle_required_quota_profiles)
+        pool_id = body.turtle_account_pool_id or resolved.default_account_pool_id
+        registry: ImageStageRegistry = request.app.state.image_stages
+        async with registry.session_lock(
+            user_id=body.turtle_user_id,
+            pool_id=pool_id,
+            session_id=body.turtle_stage_session_id,
+        ):
+            existing = registry.current(
+                user_id=body.turtle_user_id,
+                pool_id=pool_id,
+                session_id=body.turtle_stage_session_id,
+                required_quota_profiles=required_profiles,
+            )
+            request_id = f"stage-{uuid.uuid4().hex[:20]}"
+            try:
+                account_lease = await request.app.state.account_pool.acquire(
+                    pool_id=pool_id,
+                    request_id=request_id,
+                    user_id=body.turtle_user_id,
+                    chat_id=body.turtle_chat_id,
+                    selection_key="image:create",
+                    required_quota_profiles=required_profiles,
+                    required_account_id=(existing.account_id if existing else None),
+                    migration_reason_hint="image_media_prefetch",
+                )
+            except AccountUnavailable as exc:
+                return _error(503, str(exc), "image_media_prefetch_unavailable")
+
+            conversation_id = (
+                existing.conversation_id
+                if existing is not None
+                else _derive_upstream_conversation_key(
+                    resolved.gateway_api_key,
+                    account_lease.account.pool_id,
+                    f"image-stage:{body.turtle_stage_session_id}",
+                )
+            )
+            payload = {
+                "conversation_id": conversation_id,
+                "media": [
+                    [
+                        {
+                            "url": item.url,
+                            "turtle_source": item.turtle_source,
+                        },
+                        item.name,
+                    ]
+                    for item in body.turtle_media
+                ],
+            }
+            try:
+                upstream = await request.app.state.account_pool.client_for(
+                    account_lease.account
+                )
+                result = await upstream.stage_image_media(payload)
+                input_file_ids = tuple(
+                    sorted(
+                        {
+                            str(value)
+                            for value in result.get("input_file_ids", [])
+                            if _UPSTREAM_INPUT_FILE_ID_RE.fullmatch(str(value))
+                        }
+                    )
+                )
+                if not input_file_ids:
+                    raise UpstreamFailure(
+                        502,
+                        "upstream media-stage returned no prepared files",
+                    )
+            except asyncio.CancelledError:
+                await account_lease.release(
+                    outcome="cancelled",
+                    status_code=499,
+                    error_class="client_cancelled",
+                )
+                raise
+            except UpstreamFailure as exc:
+                await account_lease.release(
+                    outcome=(
+                        "error"
+                        if exc.status_code in {401, 403, 429}
+                        else "prefetch_failed"
+                    ),
+                    status_code=exc.status_code,
+                    error_class="image_media_prefetch",
+                    retry_after_seconds=exc.retry_after_seconds,
+                )
+                logger.info(
+                    "image_media_prefetch_failed id=%s status=%d total_ms=%d",
+                    request_id,
+                    exc.status_code,
+                    int((time.monotonic() - started) * 1000),
+                )
+                return _error(
+                    503,
+                    "参考图预上传暂时不可用，发送时将自动重试",
+                    "image_media_prefetch_failed",
+                )
+            except Exception:
+                await account_lease.release(
+                    outcome="prefetch_failed",
+                    status_code=502,
+                    error_class="image_media_prefetch",
+                )
+                logger.exception("image_media_prefetch_failed id=%s", request_id)
+                return _error(
+                    503,
+                    "参考图预上传暂时不可用，发送时将自动重试",
+                    "image_media_prefetch_failed",
+                )
+
+            stage = registry.remember(
+                user_id=body.turtle_user_id,
+                pool_id=pool_id,
+                session_id=body.turtle_stage_session_id,
+                conversation_id=conversation_id,
+                account_id=account_lease.account.id,
+                required_quota_profiles=required_profiles,
+                media_ids=media_ids,
+                existing=existing,
+            )
+            await request.app.state.upstream_cleanup.record(
+                account_id=account_lease.account.id,
+                pool_id=account_lease.account.pool_id,
+                user_id=body.turtle_user_id,
+                chat_id=f"image-stage:{body.turtle_stage_session_id}",
+                metadata=UpstreamResourceMetadata(
+                    input_file_ids=input_file_ids,
+                ),
+                ttl_seconds=_IMAGE_STAGE_CLEANUP_TTL_SECONDS,
+            )
+            await account_lease.release(
+                outcome="prefetched",
+                status_code=200,
+            )
+            metrics = result.get("turtle_media_metrics")
+            upload_wall_ms = (
+                int(metrics.get("upload_wall_ms") or 0)
+                if isinstance(metrics, dict)
+                else 0
+            )
+            logger.info(
+                "image_media_prefetched id=%s files=%d account=%s upload_wall_ms=%d total_ms=%d",
+                request_id,
+                len(input_file_ids),
+                account_lease.account.id,
+                max(0, min(upload_wall_ms, 3_600_000)),
+                int((time.monotonic() - started) * 1000),
+            )
+            return {
+                "ok": True,
+                "stage_token": stage.token,
+                "expires_at": stage.expires_at,
+            }
+
     @application.post("/v1/images/generations")
     async def image_generations(
         body: ImageGenerationRequest,
@@ -1613,6 +1796,29 @@ def create_app(
             )
 
         pool_id = body.turtle_account_pool_id or resolved.default_account_pool_id
+        stage_tokens = {
+            str(item.turtle_stage_token or "")
+            for item in body.turtle_media
+            if item.turtle_stage_token
+        }
+        stage_media_ids = {
+            str(item.turtle_media_id or "")
+            for item in body.turtle_media
+            if item.turtle_media_id
+        }
+        image_stage = None
+        if (
+            body.turtle_media
+            and len(stage_tokens) == 1
+            and len(stage_media_ids) == len(body.turtle_media)
+        ):
+            image_stage = request.app.state.image_stages.claim(
+                token=next(iter(stage_tokens)),
+                user_id=body.turtle_user_id,
+                pool_id=pool_id,
+                required_quota_profiles=required_profiles,
+                media_ids=stage_media_ids,
+            )
         upstream_payload = body.model_dump(
             mode="json",
             exclude_none=True,
@@ -1671,12 +1877,39 @@ def create_app(
                     selection_key="image:create",
                     excluded_account_ids=frozenset(attempted_account_ids),
                     required_quota_profiles=required_profiles,
+                    required_account_id=(
+                        image_stage.account_id
+                        if image_stage is not None and attempt_no == 1
+                        else None
+                    ),
                     migration_reason_hint=migration_reason_hint,
                 )
             except AccountUnavailable as exc:
-                if last_failure is None:
-                    last_failure = (503, str(exc))
-                break
+                if image_stage is not None and attempt_no == 1:
+                    logger.info(
+                        "image_media_prefetch_miss id=%s reason=account_unavailable",
+                        request_id,
+                    )
+                    image_stage = None
+                    try:
+                        account_lease = await request.app.state.account_pool.acquire(
+                            pool_id=pool_id,
+                            request_id=f"{attempt_id}-fallback"[:64],
+                            user_id=body.turtle_user_id,
+                            chat_id=body.turtle_chat_id,
+                            selection_key="image:create",
+                            excluded_account_ids=frozenset(attempted_account_ids),
+                            required_quota_profiles=required_profiles,
+                            migration_reason_hint=migration_reason_hint,
+                        )
+                    except AccountUnavailable as fallback_exc:
+                        if last_failure is None:
+                            last_failure = (503, str(fallback_exc))
+                        break
+                else:
+                    if last_failure is None:
+                        last_failure = (503, str(exc))
+                    break
             attempted_account_ids.add(account_lease.account.id)
             payload = dict(upstream_payload)
             if body.turtle_chat_id:
@@ -1687,6 +1920,12 @@ def create_app(
                         body.turtle_chat_id,
                     )
                 )
+            if image_stage is not None and attempt_no == 1:
+                payload["turtle_stage_conversation_id"] = (
+                    image_stage.conversation_id
+                )
+                if "conversation_id" not in payload:
+                    payload["conversation_id"] = image_stage.conversation_id
             try:
                 upstream = await request.app.state.account_pool.client_for(
                     account_lease.account

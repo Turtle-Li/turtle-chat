@@ -93,6 +93,14 @@ class ImageGenerationReference(BaseModel):
     url: str = Field(min_length=8, max_length=8192)
     turtle_source: str = Field(min_length=16, max_length=16_384)
     name: str = Field(default="reference.png", min_length=1, max_length=120)
+    turtle_media_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-fA-F-]{32,40}$",
+    )
+    turtle_stage_token: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_-]{32,128}$",
+    )
 
     @field_validator("url")
     @classmethod
@@ -138,7 +146,7 @@ class ImageGenerationRequest(BaseModel):
     )
     turtle_required_quota_profiles: list[str] = Field(
         default_factory=list,
-        max_length=4,
+        max_length=5,
     )
     turtle_media: list[ImageGenerationReference] = Field(
         default_factory=list,
@@ -157,6 +165,36 @@ class ImageGenerationRequest(BaseModel):
             if profile not in normalized:
                 normalized.append(profile)
         return normalized
+
+
+class ImageMediaStageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turtle_stage_session_id: str = Field(
+        min_length=16,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]{16,64}$",
+    )
+    turtle_account_pool_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=80,
+    )
+    turtle_user_id: str = Field(min_length=1, max_length=128)
+    turtle_chat_id: str | None = Field(default=None, min_length=1, max_length=128)
+    turtle_required_quota_profiles: list[str] = Field(
+        min_length=1,
+        max_length=5,
+    )
+    turtle_media: list[ImageGenerationReference] = Field(
+        min_length=1,
+        max_length=12,
+    )
+
+    @field_validator("turtle_required_quota_profiles")
+    @classmethod
+    def validate_stage_quota_profiles(cls, value: list[str]) -> list[str]:
+        return ImageGenerationRequest.validate_quota_profiles(value)
 
 
 class AccountPoolForm(BaseModel):

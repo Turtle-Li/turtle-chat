@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from chatgpt_web_gateway.account_pool import UpstreamAccount
+from chatgpt_web_gateway.upstream import UpstreamResourceMetadata
 from chatgpt_web_gateway.upstream_cleanup import (
     CleanupResource,
     UpstreamCleanupManager,
@@ -15,6 +16,7 @@ class FakeCleanupStore:
         self.completed: list[int] = []
         self.retried: list[tuple[int, str]] = []
         self.scheduled: list[tuple[str | None, str | None, str]] = []
+        self.recorded: list[dict] = []
 
     def mark_due(self):
         return {"ttl": 1, "orphan": 0}
@@ -55,6 +57,10 @@ class FakeCleanupStore:
     ):
         self.scheduled.append((chat_id, user_id, reason))
         return 1
+
+    def record(self, **kwargs):
+        self.recorded.append(kwargs)
+        return len(kwargs["metadata"].input_file_ids)
 
     def status(self):
         return {"counts": [], "next_due_at": None}
@@ -219,3 +225,20 @@ class UpstreamCleanupManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["policy"]["retention_seconds"], 86_400)
         self.assertEqual(result["policy"]["conversation_action"], "delete")
+
+    async def test_record_forwards_a_shorter_stage_cleanup_ttl(self) -> None:
+        value, store, _ = manager(execute=False)
+
+        recorded = await value.record(
+            account_id="account-a",
+            pool_id="gpt-default",
+            user_id="user-a",
+            chat_id="image-stage:session-a",
+            metadata=UpstreamResourceMetadata(
+                input_file_ids=("file_12345678",),
+            ),
+            ttl_seconds=3_600,
+        )
+
+        self.assertEqual(recorded, 1)
+        self.assertEqual(store.recorded[0]["ttl_seconds"], 3_600)

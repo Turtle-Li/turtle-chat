@@ -12,6 +12,7 @@ import sys
 import time
 import unittest
 import urllib.error
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -371,6 +372,43 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.post_count, 0)
         self.assertEqual(conversation.turtle_media_metrics["file_cache_hit"], 1)
         self.assertEqual(conversation.turtle_media_metrics["transfer_count"], 0)
+
+    async def test_media_stage_populates_the_shared_cache_without_submitting_a_task(self):
+        image_url = sealed_image_url()
+        shared_cache: dict = {}
+        fake_session = FakeSession()
+
+        @asynccontextmanager
+        async def persistent_session(**_kwargs):
+            yield fake_session
+
+        async def upload_files(session, auth, media, conversation):
+            self.assertIs(session, fake_session)
+            self.assertIs(auth, self.auth)
+            self.assertEqual(len(media), 1)
+            self.assertIs(
+                getattr(conversation, PRIVATE_INPUT_FILE_CACHE_ATTR),
+                shared_cache,
+            )
+            shared_cache["opaque-source-key"] = {"file_id": "file_stage_1234"}
+            conversation.turtle_media_metrics["file_cache_miss"] = 1
+            return [{"file_id": "file_stage_1234"}]
+
+        with (
+            patch.object(OpenaiChat, "get_auth_result", return_value=self.auth),
+            patch.object(OpenaiChat, "_persistent_session", new=persistent_session),
+            patch.object(OpenaiChat, "_set_api_key", return_value=True),
+            patch.object(OpenaiChat, "_warm_home", new=AsyncMock()),
+            patch.object(OpenaiChat, "upload_files", new=upload_files),
+        ):
+            result = await OpenaiChat.stage_turtle_media(
+                [[image_url, "reference.png"]],
+                turtle_input_file_cache=shared_cache,
+            )
+
+        self.assertEqual(result["input_file_ids"], ["file_stage_1234"])
+        self.assertEqual(result["turtle_media_metrics"]["file_cache_miss"], 1)
+        self.assertEqual(shared_cache["opaque-source-key"]["file_id"], "file_stage_1234")
 
     async def test_cache_miss_uploads_once_and_stores_only_minimal_metadata(self):
         source = open_model_source(sealed_image_url())

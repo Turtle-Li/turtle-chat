@@ -365,6 +365,9 @@ class UpstreamClient:
         self._cleanup_url = self._client.base_url.copy_with(
             path="/api/OpenaiAccount/turtle/cleanup"
         )
+        self._media_stage_url = self._client.base_url.copy_with(
+            path="/api/OpenaiAccount/turtle/media/stage"
+        )
         self._auth_capture_timeout_seconds = max(
             1.0,
             float(auth_capture_timeout_seconds),
@@ -412,6 +415,37 @@ class UpstreamClient:
             raise UpstreamFailure(
                 502,
                 "upstream image response was invalid",
+            )
+        return value
+
+    async def stage_image_media(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            response = await self._client.post(
+                self._media_stage_url,
+                json=payload,
+            )
+        except httpx.HTTPError as exc:
+            raise UpstreamFailure(
+                502,
+                f"upstream media-stage transport error: {redact(exc)}",
+            ) from exc
+        if response.is_error:
+            await self._raise_for_status(response)
+        try:
+            value = response.json()
+        except ValueError as exc:
+            raise UpstreamFailure(
+                502,
+                "upstream media-stage response was invalid JSON",
+            ) from exc
+        if (
+            not isinstance(value, dict)
+            or value.get("ok") is not True
+            or not isinstance(value.get("input_file_ids"), list)
+        ):
+            raise UpstreamFailure(
+                502,
+                "upstream media-stage response was invalid",
             )
         return value
 

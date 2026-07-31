@@ -26,6 +26,7 @@ from ..turtle_chat.store import CHAT_STORE
 from .core import CONFIG_STORE, StorageConfigurationError, safe_filename
 from .provider import Storage
 from .pump import MEDIA_PUMP, strict_media_mode
+from .stage import ModelStageUnavailable, stage_model_input
 from .quota import (
     QuotaExceededError,
     ensure_upload_capacity,
@@ -62,6 +63,15 @@ class PresignUploadForm(BaseModel):
 
 class CompleteUploadForm(BaseModel):
     file_id: str
+
+
+class ModelStageForm(BaseModel):
+    stage_session_id: str = Field(
+        min_length=16,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]{16,64}$",
+    )
+    chat_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ThumbnailPresignForm(ThumbnailUploadForm):
@@ -623,6 +633,50 @@ async def complete_upload(
     if not updated:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="无法完成上传记录")
     return FileModelResponse.model_validate(updated.model_dump())
+
+
+@router.post("/uploads/{file_id}/model-stage")
+async def stage_completed_model_input(
+    file_id: str,
+    form_data: ModelStageForm,
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    file = await Files.get_file_by_id_and_user_id(file_id, user.id, db=db)
+    meta = file.meta if file else {}
+    if (
+        not file
+        or (file.data or {}).get("status") != "completed"
+        or not str((meta or {}).get("content_type") or "").startswith("image/")
+        or not Storage.is_cloud_path(file.path)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前文件不能预先准备为模型输入",
+        )
+    try:
+        stage = await stage_model_input(
+            file=file,
+            user=user,
+            stage_session_id=form_data.stage_session_id,
+            chat_id=form_data.chat_id,
+        )
+    except ModelStageUnavailable as exc:
+        log.info("Model-input prefetch unavailable: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="参考图预上传暂时不可用，发送时将自动重试",
+        ) from exc
+    await Files.update_file_metadata_by_id(
+        file.id,
+        {"turtle_model_stage": stage},
+        db=db,
+    )
+    return {
+        "ok": True,
+        "ready": True,
+        "expires_at": stage["expires_at"],
+    }
 
 
 @router.get("/thumbnails/{file_id}")

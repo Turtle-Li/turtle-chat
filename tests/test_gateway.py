@@ -962,6 +962,210 @@ def test_image_generation_keeps_all_task_assets_and_stable_chat() -> None:
     assert lane["active_count"] == 0
 
 
+def test_image_media_stage_is_opaque_reused_once_and_does_not_charge_quota() -> None:
+    observed_stage: list[dict] = []
+    observed_images: list[dict] = []
+    cleanup_records: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        if request.url.path == "/api/OpenaiAccount/turtle/media/stage":
+            observed_stage.append(payload)
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "input_file_ids": ["file_stage_1234"],
+                    "turtle_media_metrics": {"upload_wall_ms": 123},
+                },
+            )
+        assert request.url.path.endswith("/images/generations")
+        observed_images.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"url": "https://media.example.test/generated-stage.png"}
+                ]
+            },
+        )
+
+    reference = {
+        "url": "https://files.example.test/reference-stage.png",
+        "turtle_source": "sealed-reference-token-stage-1",
+        "name": "reference-stage.png",
+        "turtle_media_id": "12345678-1234-1234-1234-123456789abc",
+    }
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        store = client.app.state.account_pool.store
+        store.accounts["legacy-primary"]["quota_profile"] = "plus"
+
+        async def record(**kwargs):
+            cleanup_records.append(kwargs)
+            return 1
+
+        client.app.state.upstream_cleanup.record = record
+        staged = client.post(
+            "/internal/image-media/stage",
+            headers=headers(),
+            json={
+                "turtle_stage_session_id": "0123456789abcdef0123456789abcdef",
+                "turtle_account_pool_id": "gpt-default",
+                "turtle_user_id": "user-image-stage",
+                "turtle_chat_id": "chat-image-stage",
+                "turtle_required_quota_profiles": ["plus"],
+                "turtle_media": [reference],
+            },
+        )
+        staged_snapshot = client.get(
+            "/internal/account-pools",
+            headers=headers(),
+        ).json()
+        stage_token = staged.json()["stage_token"]
+        generated = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "use the staged reference",
+                "turtle_user_id": "user-image-stage",
+                "turtle_chat_id": "chat-image-stage",
+                "turtle_request_id": "img-staged-reference",
+                "turtle_account_pool_id": "gpt-default",
+                "turtle_required_quota_profiles": ["plus"],
+                "turtle_media": [
+                    {**reference, "turtle_stage_token": stage_token}
+                ],
+            },
+        )
+
+    assert staged.status_code == 200
+    assert set(staged.json()) == {"ok", "stage_token", "expires_at"}
+    assert "file_stage_1234" not in staged.text
+    assert "legacy-primary" not in staged.text
+    assert generated.status_code == 200
+    assert len(observed_stage) == 1
+    assert len(observed_images) == 1
+    assert observed_images[0]["turtle_stage_conversation_id"].startswith(
+        "turtle-v1-"
+    )
+    assert observed_images[0]["conversation_id"] == _derive_upstream_conversation_key(
+        "gateway-test-key",
+        "gpt-default",
+        "chat-image-stage",
+    )
+    assert observed_images[0]["media"] == [
+        [
+            {
+                "url": reference["url"],
+                "turtle_source": reference["turtle_source"],
+            },
+            reference["name"],
+        ]
+    ]
+    assert cleanup_records[0]["metadata"].input_file_ids == (
+        "file_stage_1234",
+    )
+    assert cleanup_records[0]["ttl_seconds"] == 3_600
+    staged_account = next(
+        item
+        for item in staged_snapshot["accounts"]
+        if item["id"] == "legacy-primary"
+    )
+    staged_lane = next(
+        item
+        for item in staged_account["quota"]["lanes"]
+        if item["selection_key"] == "image:create"
+    )
+    assert staged_lane["used_count"] == 0
+    assert staged_lane["active_count"] == 0
+
+
+def test_image_media_stage_falls_back_when_the_prepared_account_is_unavailable() -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append((str(request.url.host), request.url.path, payload))
+        if request.url.path == "/api/OpenaiAccount/turtle/media/stage":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "input_file_ids": ["file_stage_fallback"],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"url": "https://media.example.test/generated-fallback.png"}
+                ]
+            },
+        )
+
+    reference = {
+        "url": "https://files.example.test/reference-fallback.png",
+        "turtle_source": "sealed-reference-token-fallback-1",
+        "name": "reference-fallback.png",
+        "turtle_media_id": "abcdef12-1234-1234-1234-123456789abc",
+    }
+    with TestClient(
+        create_app(
+            settings(backend="upstream"),
+            upstream_transport=httpx.MockTransport(handler),
+        )
+    ) as client:
+        store = client.app.state.account_pool.store
+        store.accounts["legacy-primary"]["quota_profile"] = "plus"
+        staged = client.post(
+            "/internal/image-media/stage",
+            headers=headers(),
+            json={
+                "turtle_stage_session_id": "fedcba9876543210fedcba9876543210",
+                "turtle_user_id": "user-stage-fallback",
+                "turtle_chat_id": "chat-stage-fallback",
+                "turtle_required_quota_profiles": ["plus"],
+                "turtle_media": [reference],
+            },
+        )
+        assert staged.status_code == 200
+        add_memory_backup_account(client)
+        store.accounts["legacy-primary"]["enabled"] = False
+        store.accounts["legacy-primary"]["status"] = "disabled"
+
+        generated = client.post(
+            "/v1/images/generations",
+            headers=headers(),
+            json={
+                "model": "gpt-image",
+                "prompt": "fallback safely",
+                "turtle_user_id": "user-stage-fallback",
+                "turtle_chat_id": "chat-stage-fallback",
+                "turtle_request_id": "img-stage-fallback",
+                "turtle_required_quota_profiles": ["plus"],
+                "turtle_media": [
+                    {
+                        **reference,
+                        "turtle_stage_token": staged.json()["stage_token"],
+                    }
+                ],
+            },
+        )
+
+    assert generated.status_code == 200
+    assert [(host, path) for host, path, _payload in calls] == [
+        ("upstream.test", "/api/OpenaiAccount/turtle/media/stage"),
+        ("backup.test", "/v1/images/generations"),
+    ]
+    assert "turtle_stage_conversation_id" not in calls[-1][2]
+
+
 def test_image_generation_allows_plus_request_to_overflow_into_pro_profile() -> None:
     calls = 0
 
