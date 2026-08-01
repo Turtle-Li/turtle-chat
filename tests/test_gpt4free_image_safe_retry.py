@@ -41,6 +41,8 @@ class FakeOpenaiAccount:
     error_message = "Error in message stream"
     error_type: type[Exception] = RuntimeError
     task_lock: asyncio.Lock | None = None
+    recovery_urls: list[str] = []
+    recoveries = 0
 
     @classmethod
     def reset(
@@ -50,6 +52,7 @@ class FakeOpenaiAccount:
         fail_attempts: int = 1,
         error_message: str = "Error in message stream",
         error_type: type[Exception] = RuntimeError,
+        recovery_urls: list[str] | None = None,
     ) -> None:
         cls.quotas = list(quotas)
         cls.attempts = 0
@@ -57,6 +60,8 @@ class FakeOpenaiAccount:
         cls.error_message = error_message
         cls.error_type = error_type
         cls.task_lock = None
+        cls.recovery_urls = list(recovery_urls or [])
+        cls.recoveries = 0
 
     @classmethod
     def _image_task_lock(cls) -> asyncio.Lock:
@@ -78,6 +83,14 @@ class FakeOpenaiAccount:
             "generated",
             {},
         )
+
+    @classmethod
+    async def recover_consumed_image(cls, tracker: dict, **_kwargs):
+        cls.recoveries += 1
+        assert isinstance(tracker, dict)
+        if not cls.recovery_urls:
+            return []
+        return [MediaResponse(cls.recovery_urls, "recovered", {})]
 
 
 async def generate() -> MediaResponse:
@@ -137,9 +150,39 @@ def test_does_not_retry_when_failed_stream_already_consumed_allowance(
     response = asyncio.run(generate())
 
     assert FakeOpenaiAccount.attempts == 1
+    assert FakeOpenaiAccount.recoveries == 1
     assert response.urls == []
     assert response.options["turtle_usage"]["source"] == "official_remaining_delta"
     assert response.options["turtle_usage"]["image_units"] == 1
+
+
+@requires_runtime
+def test_recovers_consumed_task_without_replaying_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeOpenaiAccount.reset(
+        [
+            {"remaining": 10, "blocked": False},
+            {"remaining": 9, "blocked": False},
+        ],
+        recovery_urls=["https://example.invalid/recovered.png"],
+    )
+
+    async def unexpected_sleep(_seconds: float) -> None:
+        pytest.fail("consumed image recovery must not replay the prompt")
+
+    monkeypatch.setattr(client_module.asyncio, "sleep", unexpected_sleep)
+    response = asyncio.run(generate())
+
+    assert FakeOpenaiAccount.attempts == 1
+    assert FakeOpenaiAccount.recoveries == 1
+    assert response.urls == ["https://example.invalid/recovered.png"]
+    assert response.options["turtle_usage"] == {
+        "image_units": 1,
+        "source": "official_remaining_delta",
+        "remaining": 9,
+        "reset_after": None,
+    }
 
 
 @requires_runtime

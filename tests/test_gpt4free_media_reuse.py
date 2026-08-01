@@ -27,6 +27,7 @@ from g4f.Provider.needs_auth.OpenaiChat import (  # noqa: E402
     OpenaiChat,
     Conversation,
     PRIVATE_INPUT_FILE_CACHE_ATTR,
+    PRIVATE_SUBMITTED_MESSAGE_ID_ATTR,
     _merge_model_media,
     _new_media_metrics,
     _private_input_file_cache_key,
@@ -42,6 +43,7 @@ from g4f.Provider.openai.media_pump import (  # noqa: E402
     open_model_source,
     probe_media,
 )
+from g4f.providers.response import ImageResponse  # noqa: E402
 
 
 PUMP_SECRET = "unit-test-pump-secret-that-is-at-least-thirty-two-characters"
@@ -123,6 +125,16 @@ class FakeSession:
     def delete(self, url, **_kwargs):
         self.deleted_ids.append(str(url).rsplit("/", 1)[-1])
         return FakeResponse({}, status=204)
+
+
+class ConversationHistorySession:
+    def __init__(self, payload: dict):
+        self.payload = payload
+        self.get_count = 0
+
+    def get(self, _url, **_kwargs):
+        self.get_count += 1
+        return FakeResponse(self.payload)
 
 
 class ConcurrentFakeSession:
@@ -378,6 +390,198 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
             tracker.turtle_emitted_asset_ids,
             {"file_generated_12345678"},
         )
+
+    async def test_wait_media_recovers_only_descendants_of_current_submission(self):
+        conversation = Conversation(
+            conversation_id="conversation_current_1234",
+            message_id="parent_current_1234",
+            user_id=None,
+        )
+        conversation.task = None
+        setattr(
+            conversation,
+            PRIVATE_SUBMITTED_MESSAGE_ID_ATTR,
+            "user_current_1234",
+        )
+        session = ConversationHistorySession(
+            {
+                "mapping": {
+                    "user_prior_1234": {
+                        "id": "user_prior_1234",
+                        "parent": None,
+                        "message": {
+                            "id": "user_prior_1234",
+                            "author": {"role": "user"},
+                            "content": {"parts": ["old request"]},
+                        },
+                    },
+                    "assistant_prior_1234": {
+                        "id": "assistant_prior_1234",
+                        "parent": "user_prior_1234",
+                        "message": {
+                            "id": "assistant_prior_1234",
+                            "author": {"role": "assistant"},
+                            "status": "finished_successfully",
+                            "content": {
+                                "parts": [
+                                    {
+                                        "content_type": "image_asset_pointer",
+                                        "asset_pointer": "file-service://file_prior_1234",
+                                    }
+                                ]
+                            },
+                        },
+                    },
+                    "user_current_1234": {
+                        "id": "user_current_1234",
+                        "parent": "assistant_prior_1234",
+                        "message": {
+                            "id": "user_current_1234",
+                            "author": {"role": "user"},
+                            "content": {"parts": ["current request"]},
+                        },
+                    },
+                    "tool_current_1234": {
+                        "id": "tool_current_1234",
+                        "parent": "user_current_1234",
+                        "message": {
+                            "id": "tool_current_1234",
+                            "author": {"role": "tool"},
+                            "content": {"parts": []},
+                        },
+                    },
+                    "assistant_current_1234": {
+                        "id": "assistant_current_1234",
+                        "parent": "tool_current_1234",
+                        "message": {
+                            "id": "assistant_current_1234",
+                            "author": {"role": "assistant"},
+                            "status": "finished_successfully",
+                            "metadata": {"async_task_title": "current"},
+                            "content": {
+                                "parts": [
+                                    {
+                                        "content_type": "image_asset_pointer",
+                                        "asset_pointer": "file-service://file_current_1234",
+                                    }
+                                ]
+                            },
+                        },
+                    },
+                }
+            }
+        )
+        generated = object()
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                OpenaiChat,
+                "get_generated_image",
+                new=AsyncMock(return_value=generated),
+            ) as get_generated,
+        ):
+            recovered = [
+                item
+                async for item in OpenaiChat.wait_media(
+                    session,
+                    conversation,
+                    {},
+                    self.auth,
+                    poll_interval=0,
+                    timeout=1,
+                )
+            ]
+
+        self.assertEqual(recovered, [generated])
+        self.assertEqual(session.get_count, 1)
+        self.assertEqual(get_generated.await_count, 1)
+        self.assertEqual(
+            get_generated.await_args.args[2],
+            "file-service://file_current_1234",
+        )
+
+    async def test_consumed_recovery_polls_the_exact_turn_only_once(self):
+        conversation = Conversation(
+            conversation_id="conversation_recovery_1234",
+            message_id="parent_recovery_1234",
+            user_id=None,
+        )
+        setattr(
+            conversation,
+            PRIVATE_SUBMITTED_MESSAGE_ID_ATTR,
+            "user_recovery_1234",
+        )
+        session = ConversationHistorySession(
+            {
+                "mapping": {
+                    "user_recovery_1234": {
+                        "id": "user_recovery_1234",
+                        "parent": None,
+                        "message": {
+                            "id": "user_recovery_1234",
+                            "author": {"role": "user"},
+                            "content": {"parts": ["request"]},
+                        },
+                    },
+                    "assistant_recovery_1234": {
+                        "id": "assistant_recovery_1234",
+                        "parent": "user_recovery_1234",
+                        "message": {
+                            "id": "assistant_recovery_1234",
+                            "author": {"role": "assistant"},
+                            "status": "finished_successfully",
+                            "content": {
+                                "parts": [
+                                    {
+                                        "content_type": "image_asset_pointer",
+                                        "asset_pointer": "file-service://file_recovery_1234",
+                                    }
+                                ]
+                            },
+                        },
+                    },
+                }
+            }
+        )
+        recovered_image = ImageResponse(
+            ["https://oaiusercontent.example/recovered"],
+            "recovered",
+        )
+
+        @asynccontextmanager
+        async def persistent_session(**_kwargs):
+            yield session
+
+        with (
+            patch.object(OpenaiChat, "get_auth_result", return_value=self.auth),
+            patch.object(OpenaiChat, "_persistent_session", new=persistent_session),
+            patch.object(OpenaiChat, "_set_api_key", return_value=True),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch.object(
+                OpenaiChat,
+                "get_generated_image",
+                new=AsyncMock(return_value=recovered_image),
+            ),
+        ):
+            first = await OpenaiChat.recover_consumed_image(
+                {"conversation": conversation},
+                timeout=10,
+            )
+            second = await OpenaiChat.recover_consumed_image(
+                {"conversation": conversation},
+                timeout=10,
+            )
+
+        self.assertEqual(first, [recovered_image])
+        self.assertEqual(second, [])
+        self.assertEqual(session.get_count, 1)
 
     async def test_valid_cached_file_id_skips_probe_and_transfer(self):
         source = open_model_source(sealed_image_url())

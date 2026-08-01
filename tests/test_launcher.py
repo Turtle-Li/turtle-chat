@@ -462,6 +462,25 @@ def test_gpt4free_overlay_tracks_official_image_delta_and_conversation() -> None
     )
     assert "+                    and image_remaining(quota_before)" in overlay
     assert "+                    == image_remaining(quota_after)" in overlay
+    assert '+        turtle_image_tracker: Optional[dict] = None,' in overlay
+    assert (
+        '+                            await provider_handler.recover_consumed_image('
+        in overlay
+    )
+    assert (
+        '+        """Recover one accepted image turn without replaying its prompt."""'
+        in overlay
+    )
+    assert (
+        '+            print("turtle_image_consumed_recovery=1", flush=True)'
+        in overlay
+    )
+    assert '+            current_turn_node_ids: set[str] = set()' in overlay
+    assert (
+        '+                    (belongs_to_current_task or '
+        'belongs_to_current_submission)'
+        in overlay
+    )
 
 
 def test_gpt4free_overlay_runs_independent_preflight_requests_in_parallel() -> None:
