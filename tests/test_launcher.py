@@ -241,6 +241,21 @@ def test_gpt4free_overlay_tracks_image_tasks_before_completion() -> None:
     assert "+            conversation.generated_images = None" in overlay
 
 
+def test_gpt4free_overlay_never_emits_current_input_files_as_generated_assets() -> None:
+    overlay = (
+        LAUNCHER_PATH.parents[1]
+        / "patches/gpt4free-openaiaccount-gpt56.patch"
+    ).read_text(encoding="utf-8")
+
+    assert '+                "turtle_input_file_ids",' in overlay
+    assert "+                isinstance(input_assets, (list, tuple, set))" in overlay
+    assert "+                                in conversation.turtle_input_file_ids" in overlay
+    assert (
+        "+                                                                            "
+        "prompt, tracker=conversation)"
+    ) in overlay
+
+
 def test_gpt4free_overlay_recovers_accepted_image_task_after_stream_error() -> None:
     overlay = (
         LAUNCHER_PATH.parents[1]

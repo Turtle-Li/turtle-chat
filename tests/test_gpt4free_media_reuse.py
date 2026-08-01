@@ -323,6 +323,62 @@ class UpstreamFileReuseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.environment.stop()
 
+    async def test_generated_image_ignores_current_input_file_id(self):
+        tracker = Conversation(user_id=None)
+        tracker.turtle_input_file_ids = ["file_input_12345678"]
+        session = FakeSession()
+
+        result = await OpenaiChat.get_generated_image(
+            session,
+            self.auth,
+            "file-service://file_input_12345678",
+            prompt="generated",
+            tracker=tracker,
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(session.get_count, 0)
+        self.assertEqual(tracker.turtle_generated_asset_ids, [])
+        self.assertEqual(tracker.turtle_emitted_asset_ids, set())
+
+    async def test_generated_image_keeps_a_distinct_generated_asset(self):
+        tracker = Conversation(user_id=None)
+        tracker.turtle_input_file_ids = ["file_input_12345678"]
+        session = FakeSession()
+
+        with (
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.raise_for_status",
+                new=AsyncMock(),
+            ),
+            patch(
+                "g4f.Provider.needs_auth.OpenaiChat.seal_media_sources",
+                side_effect=lambda source, _headers: source,
+            ),
+            patch.object(OpenaiChat, "_update_request_args"),
+        ):
+            result = await OpenaiChat.get_generated_image(
+                session,
+                SimpleNamespace(
+                    cookies={},
+                    headers={"authorization": "Bearer test-token"},
+                ),
+                "file-service://file_generated_12345678",
+                prompt="generated",
+                tracker=tracker,
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(session.get_count, 1)
+        self.assertEqual(
+            tracker.turtle_generated_asset_ids,
+            ["file_generated_12345678"],
+        )
+        self.assertEqual(
+            tracker.turtle_emitted_asset_ids,
+            {"file_generated_12345678"},
+        )
+
     async def test_valid_cached_file_id_skips_probe_and_transfer(self):
         source = open_model_source(sealed_image_url())
         source_cache_key = _private_input_file_cache_key(source)
