@@ -642,8 +642,12 @@ def test_gpt4free_overlay_captures_login_without_sending_a_chat() -> None:
     quota_marker = "+                captured_identity = await asyncio.wait_for("
     assert quota_marker in overlay
     assert overlay.index(login_marker) < overlay.index(quota_marker)
-    assert "+                    provider.get_quota()," in overlay
+    assert "+                    provider.get_quota(fresh_session=True)," in overlay
     assert "+                    timeout=20.0," in overlay
+    assert "+    async def get_quota(cls, fresh_session: bool = False, **kwargs):" in overlay
+    assert "+        session_context = (" in overlay
+    assert "+            if fresh_session" in overlay
+    assert "+                max_clients=1," in overlay
     assert "+    def reset_auth_state_for_capture(cls) -> None:" in overlay
     assert "+        cls.request_config = RequestConfig()" in overlay
     assert "+        force_browser: bool = False," in overlay
@@ -659,6 +663,10 @@ def test_gpt4free_overlay_captures_login_without_sending_a_chat() -> None:
     assert active_marker in overlay
     assert start_marker in overlay
     assert finish_marker in overlay
+    assert "+        self.turtle_openai_auth_operation_lock = asyncio.Lock()" in overlay
+    assert "+                await self.turtle_openai_auth_operation_lock.acquire()" in overlay
+    assert "+                    self.turtle_openai_auth_operation_lock.release()" in overlay
+    assert '+                            "OpenaiAccount login capture is in progress",' in overlay
     assert overlay.index(active_marker) < overlay.index(start_marker)
     assert overlay.index(start_marker) < overlay.index(reset_marker)
     assert overlay.index(reset_marker) < overlay.index(finish_marker)

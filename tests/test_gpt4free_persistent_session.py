@@ -315,6 +315,253 @@ def test_openai_account_leases_reusable_sessions_without_concurrent_sharing(
 
 
 @requires_runtime
+def test_openai_account_capture_quota_bypasses_stale_pooled_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeQuotaResponse:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+            return None
+
+        async def json(self) -> dict[str, str]:
+            return {"id": "synthetic", "name": "Synthetic Account"}
+
+    class FakeQuotaSession:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        def get(self, _url: str, *, headers: dict):
+            assert headers == {"authorization": "Bearer fresh-token"}
+            return FakeQuotaResponse(self.status)
+
+    class FreshQuotaSession(FakeQuotaSession):
+        instances: list["FreshQuotaSession"] = []
+
+        def __init__(self, **kwargs) -> None:
+            super().__init__(200)
+            self.kwargs = kwargs
+            self.instances.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _traceback) -> None:
+            return None
+
+    persistent_calls: list[dict] = []
+
+    @contextlib.asynccontextmanager
+    async def stale_persistent_session(cls, **kwargs):
+        persistent_calls.append(kwargs)
+        yield FakeQuotaSession(401)
+
+    async def fake_warm_home(cls, _session, _auth) -> bool:
+        return False
+
+    async def fake_raise_for_status(response) -> None:
+        if response.status == 401:
+            raise openai_chat_module.MissingAuthError("synthetic stale session")
+
+    monkeypatch.setattr(openai_chat_module, "StreamSession", FreshQuotaSession)
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "_persistent_session",
+        classmethod(stale_persistent_session),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "get_auth_result",
+        classmethod(
+            lambda cls: SimpleNamespace(
+                api_key="fresh-token",
+                cookies={},
+                headers={},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "_set_api_key",
+        classmethod(lambda cls, _api_key: True),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "_warm_home",
+        classmethod(fake_warm_home),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "_update_request_args",
+        classmethod(lambda cls, _auth, _session: None),
+    )
+    monkeypatch.setattr(openai_chat_module, "raise_for_status", fake_raise_for_status)
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "_headers",
+        {"authorization": "Bearer fresh-token"},
+    )
+    FreshQuotaSession.instances.clear()
+
+    async def exercise() -> None:
+        fresh = await OpenaiAccount.get_quota(fresh_session=True)
+        assert fresh == {"id": "synthetic", "name": "Synthetic Account"}
+        with pytest.raises(
+            openai_chat_module.MissingAuthError,
+            match="synthetic stale session",
+        ):
+            await OpenaiAccount.get_quota()
+
+    asyncio.run(exercise())
+
+    assert len(FreshQuotaSession.instances) == 1
+    assert FreshQuotaSession.instances[0].kwargs["max_clients"] == 1
+    assert len(persistent_calls) == 1
+    assert persistent_calls[0]["proxy"] is None
+    assert persistent_calls[0]["timeout"] == 360
+    assert (
+        persistent_calls[0]["curl_infos"]
+        == FreshQuotaSession.instances[0].kwargs["curl_infos"]
+    )
+
+
+@requires_runtime
+def test_openai_account_capture_serializes_ordinary_quota(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import httpx
+    from fastapi import FastAPI
+
+    g4f_api_module = importlib.import_module("g4f.api")
+    api_app = FastAPI()
+    api = g4f_api_module.Api(api_app)
+    api.register_routes()
+
+    ordinary_started = asyncio.Event()
+    ordinary_release = asyncio.Event()
+    capture_login_started = asyncio.Event()
+    capture_login_release = asyncio.Event()
+    ordinary_calls = 0
+    quota_modes: list[bool] = []
+    cache_file = tmp_path / "auth_OpenaiChat.json"
+
+    async def fake_quota(cls, fresh_session: bool = False, **_kwargs):
+        nonlocal ordinary_calls
+        quota_modes.append(fresh_session)
+        if fresh_session:
+            assert cls._api_key == "fresh-token"
+            return {"id": "synthetic", "name": "Synthetic Account"}
+        ordinary_calls += 1
+        ordinary_started.set()
+        await ordinary_release.wait()
+        if ordinary_calls == 1:
+            cls._api_key = "stale-token"
+        return {"id": "stale", "name": "Stale Account"}
+
+    async def fake_login(cls, **kwargs) -> None:
+        assert kwargs == {"force_browser": True}
+        capture_login_started.set()
+        await capture_login_release.wait()
+        cls._api_key = "fresh-token"
+        cache_file.write_text("{}", encoding="utf-8")
+        cache_file.chmod(0o600)
+
+    def fake_reset(cls) -> None:
+        cls._api_key = None
+
+    monkeypatch.setenv("GPT4FREE_AUTH_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        g4f_api_module.AbstractClientFactory,
+        "create_provider",
+        staticmethod(lambda *_args, **_kwargs: OpenaiAccount),
+    )
+    monkeypatch.setattr(
+        importlib.import_module("g4f.cookies"),
+        "set_cookies_dir",
+        lambda configured: None,
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "get_cache_file",
+        classmethod(lambda cls: cache_file),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "get_auth_result",
+        classmethod(lambda cls: SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "reset_auth_state_for_capture",
+        classmethod(fake_reset),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "login",
+        classmethod(fake_login),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "get_quota",
+        classmethod(fake_quota),
+    )
+
+    async def exercise() -> None:
+        transport = httpx.ASGITransport(app=api_app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            ordinary = asyncio.create_task(
+                client.get("/api/OpenaiAccount/quota")
+            )
+            await ordinary_started.wait()
+
+            capture = asyncio.create_task(
+                client.post("/api/OpenaiAccount/auth/capture")
+            )
+            await asyncio.sleep(0)
+            assert not capture_login_started.is_set()
+
+            blocked_while_draining = await client.get(
+                "/api/OpenaiAccount/quota"
+            )
+            assert blocked_while_draining.status_code == 409
+            assert ordinary_calls == 1
+
+            ordinary_release.set()
+            assert (await ordinary).status_code == 200
+            await capture_login_started.wait()
+
+            blocked_during_capture = await client.get(
+                "/api/OpenaiAccount/quota"
+            )
+            assert blocked_during_capture.status_code == 409
+            assert ordinary_calls == 1
+
+            capture_login_release.set()
+            captured = await capture
+            assert captured.status_code == 200
+            assert captured.json() == {"ok": True}
+
+            after_capture = await client.get("/api/OpenaiAccount/quota")
+            assert after_capture.status_code == 200
+
+    asyncio.run(exercise())
+
+    assert quota_modes == [False, True, False]
+    assert ordinary_calls == 2
+    assert OpenaiAccount._api_key == "fresh-token"
+    assert api.turtle_openai_auth_capture_active is False
+    assert api.turtle_openai_auth_operation_lock.locked() is False
+
+
+@requires_runtime
 def test_openai_account_recognizes_wrapped_explicit_rate_limits() -> None:
     assert payload_has_explicit_rate_limit(
         {"error": {"message": "You've hit your limit. Try again later."}}
