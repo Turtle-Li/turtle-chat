@@ -17,12 +17,20 @@ try:
         "g4f.Provider.needs_auth.OpenaiChat"
     )
     OpenaiChat = openai_chat_module.OpenaiChat
+    OpenaiAccount = importlib.import_module(
+        "g4f.Provider.needs_auth.OpenaiAccount"
+    ).OpenaiAccount
+    RequestConfig = importlib.import_module(
+        "g4f.Provider.openai.har_file"
+    ).RequestConfig
     payload_has_explicit_rate_limit = (
         openai_chat_module._payload_has_explicit_rate_limit
     )
 except ModuleNotFoundError as exc:
     openai_chat_module = None
     OpenaiChat = None
+    OpenaiAccount = None
+    RequestConfig = None
     payload_has_explicit_rate_limit = None
     RUNTIME_IMPORT_ERROR = exc
 
@@ -52,6 +60,85 @@ class FakeCookies:
 
     def clear(self) -> None:
         self.clear_count += 1
+
+
+@requires_runtime
+def test_openai_account_capture_discards_stale_process_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_config = RequestConfig()
+    stale_config.access_token = "expired-token"
+    stale_config.cookies = {"stale": "cookie"}
+    stale_config.headers = {"authorization": "Bearer expired-token"}
+    monkeypatch.setattr(OpenaiAccount, "request_config", stale_config)
+    monkeypatch.setattr(OpenaiAccount, "_api_key", "expired-token")
+    monkeypatch.setattr(OpenaiAccount, "_headers", stale_config.headers)
+    monkeypatch.setattr(OpenaiAccount, "_cookies", stale_config.cookies)
+    monkeypatch.setattr(OpenaiAccount, "_expires", 1)
+    monkeypatch.setattr(OpenaiAccount, "_turtle_home_warmed_at", 123.0)
+
+    OpenaiAccount.reset_auth_state_for_capture()
+
+    assert OpenaiAccount._api_key is None
+    assert OpenaiAccount._headers is None
+    assert OpenaiAccount._cookies is None
+    assert OpenaiAccount._expires is None
+    assert OpenaiAccount.request_config is not stale_config
+    assert OpenaiAccount.request_config.access_token is None
+    assert OpenaiAccount._turtle_home_warmed_at == 0.0
+
+
+@requires_runtime
+def test_openai_account_forced_browser_capture_bypasses_stale_har(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale_config = RequestConfig()
+    stale_config.access_token = "revoked-but-unexpired-token"
+    monkeypatch.setattr(OpenaiAccount, "request_config", stale_config)
+    monkeypatch.setattr(openai_chat_module, "has_nodriver", True)
+    browser_calls: list[str | None] = []
+    cache_writes: list[tuple[Path, object]] = []
+
+    async def reject_har(*_args, **_kwargs):
+        raise AssertionError("forced browser capture must not inspect HAR credentials")
+
+    async def fake_nodriver_auth(cls, proxy: str | None = None) -> None:
+        browser_calls.append(proxy)
+
+    def fake_cache_file(cls) -> Path:
+        return Path("synthetic-auth.json")
+
+    def fake_write_cache_file(cls, cache_file: Path, auth_result: object) -> None:
+        cache_writes.append((cache_file, auth_result))
+
+    monkeypatch.setattr(openai_chat_module, "get_request_config", reject_har)
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "nodriver_auth",
+        classmethod(fake_nodriver_auth),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "get_cache_file",
+        classmethod(fake_cache_file),
+    )
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "write_cache_file",
+        classmethod(fake_write_cache_file),
+    )
+
+    async def exercise() -> None:
+        await OpenaiAccount.login(
+            proxy="http://127.0.0.1:17897",
+            force_browser=True,
+        )
+
+    asyncio.run(exercise())
+
+    assert browser_calls == ["http://127.0.0.1:17897"]
+    assert len(cache_writes) == 1
+    assert cache_writes[0][0] == Path("synthetic-auth.json")
 
 
 @requires_runtime

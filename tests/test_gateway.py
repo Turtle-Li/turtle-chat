@@ -2858,13 +2858,19 @@ def test_account_pool_admin_flow_keeps_new_account_disabled_until_enabled() -> N
 
 def test_account_reauth_opens_isolated_login_and_recovers_only_after_restart_probe() -> None:
     upstream_actions: list[str] = []
+    actions: list[str] = []
+    worker_restarted = False
 
     def upstream_handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/OpenaiAccount/auth/capture":
             upstream_actions.append("capture")
+            actions.append("capture")
             return httpx.Response(200, json={"ok": True})
         if request.url.path == "/healthz":
             upstream_actions.append("probe")
+            actions.append("probe")
+            if not worker_restarted:
+                return httpx.Response(401, json={"ok": False})
             return httpx.Response(
                 200,
                 json={
@@ -2876,7 +2882,9 @@ def test_account_reauth_opens_isolated_login_and_recovers_only_after_restart_pro
         return httpx.Response(200, json={"object": "list", "data": []})
 
     def control_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal worker_restarted
         action = request.url.path.rsplit("/", 1)[-1]
+        actions.append(action)
         if action == "status":
             return httpx.Response(
                 200,
@@ -2897,6 +2905,7 @@ def test_account_reauth_opens_isolated_login_and_recovers_only_after_restart_pro
                 },
             )
         if action == "restart":
+            worker_restarted = True
             return httpx.Response(
                 200,
                 json={
@@ -2947,18 +2956,109 @@ def test_account_reauth_opens_isolated_login_and_recovers_only_after_restart_pro
             assert still_waiting["accounts"][0]["status"] == "reauth_required"
 
             upstream_actions.clear()
+            actions.clear()
             verified = client.post(
                 "/internal/accounts/legacy-primary/reauth/verify",
                 headers=headers(),
             )
             assert verified.status_code == 200
-            assert upstream_actions == ["capture", "probe", "probe"]
+            assert actions == ["status", "capture", "restart", "probe"]
+            assert upstream_actions == ["capture", "probe"]
             assert verified.json()["state"] == "ready"
             assert verified.json()["upstream_display_name"] == "ChatGPT 主账号"
             assert "private-upstream-id" not in verified.text
             ready = client.get("/internal/account-pools", headers=headers()).json()
             assert ready["accounts"][0]["available"] is True
             assert ready["accounts"][0]["upstream_display_name"] == "ChatGPT 主账号"
+
+
+def test_account_reauth_rejects_duplicate_verify_while_in_progress() -> None:
+    async def exercise(secret_path: Path) -> None:
+        actions: list[str] = []
+        capture_started = asyncio.Event()
+        release_capture = asyncio.Event()
+
+        async def upstream_handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/OpenaiAccount/auth/capture":
+                actions.append("capture")
+                capture_started.set()
+                await release_capture.wait()
+                return httpx.Response(200, json={"ok": True})
+            if request.url.path == "/healthz":
+                actions.append("probe")
+                return httpx.Response(200, json={"ok": True})
+            return httpx.Response(404)
+
+        def control_handler(request: httpx.Request) -> httpx.Response:
+            action = request.url.path.rsplit("/", 1)[-1]
+            actions.append(action)
+            if action in {"status", "open"}:
+                return httpx.Response(
+                    200,
+                    json={
+                        "account_id": "legacy-primary",
+                        "configured": True,
+                        "browser_state": "ready",
+                    },
+                )
+            if action == "restart":
+                return httpx.Response(
+                    200,
+                    json={
+                        "account_id": "legacy-primary",
+                        "configured": True,
+                        "browser_state": "stopped",
+                    },
+                )
+            return httpx.Response(404, json={"detail": "missing"})
+
+        application = create_app(
+            settings(
+                backend="upstream",
+                upstream_health_path="/healthz",
+                login_control_url="http://127.0.0.1:8340",
+                login_control_secret_file=str(secret_path),
+            ),
+            upstream_transport=httpx.MockTransport(upstream_handler),
+            login_control_transport=httpx.MockTransport(control_handler),
+        )
+        async with application.router.lifespan_context(application):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=application),
+                base_url="http://testserver",
+            ) as client:
+                started = await client.post(
+                    "/internal/accounts/legacy-primary/reauth/start",
+                    headers=headers(),
+                )
+                assert started.status_code == 200
+                actions.clear()
+
+                first = asyncio.create_task(
+                    client.post(
+                        "/internal/accounts/legacy-primary/reauth/verify",
+                        headers=headers(),
+                    )
+                )
+                await asyncio.wait_for(capture_started.wait(), timeout=2)
+                duplicate = await client.post(
+                    "/internal/accounts/legacy-primary/reauth/verify",
+                    headers=headers(),
+                )
+                assert duplicate.status_code == 409
+                assert "正在验证" in duplicate.json()["error"]["message"]
+
+                release_capture.set()
+                verified = await asyncio.wait_for(first, timeout=2)
+
+        assert verified.status_code == 200
+        assert actions == ["status", "capture", "restart", "probe"]
+
+    with tempfile.TemporaryDirectory() as temp:
+        secret = Path(temp) / "login-control-secret"
+        secret.write_text("b" * 64, encoding="utf-8")
+        os.chmod(secret, 0o600)
+        asyncio.run(exercise(secret))
 
 
 def test_claude_reauth_switches_manual_browser_to_cdp_only_when_verifying() -> None:
@@ -3040,7 +3140,7 @@ def test_claude_reauth_switches_manual_browser_to_cdp_only_when_verifying() -> N
 
     assert verified.status_code == 200
     assert control_actions == ["status", "capture", "restart"]
-    assert upstream_actions == ["capture", "probe", "probe"]
+    assert upstream_actions == ["capture", "probe"]
     assert verified.json()["state"] == "ready"
     assert verified.json()["upstream_display_name"] == "Claude 主账号"
 
@@ -3111,6 +3211,163 @@ def test_account_reauth_stops_before_probe_when_browser_auth_capture_fails() -> 
             )
             assert upstream_actions == ["capture"]
             assert control_actions == ["status"]
+            waiting = client.get("/internal/account-pools", headers=headers()).json()
+            assert waiting["accounts"][0]["status"] == "reauth_required"
+
+
+def test_account_reauth_restart_failure_keeps_all_capacity_blocked() -> None:
+    actions: list[str] = []
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/OpenaiAccount/auth/capture":
+            actions.append("capture")
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/healthz":
+            actions.append("probe")
+            return httpx.Response(200, json={"ok": True})
+        return httpx.Response(404)
+
+    def control_handler(request: httpx.Request) -> httpx.Response:
+        action = request.url.path.rsplit("/", 1)[-1]
+        actions.append(action)
+        if action in {"status", "open"}:
+            return httpx.Response(
+                200,
+                json={
+                    "account_id": "legacy-primary",
+                    "configured": True,
+                    "browser_state": "ready",
+                },
+            )
+        if action == "restart":
+            return httpx.Response(503, json={"detail": "restart failed"})
+        return httpx.Response(404, json={"detail": "missing"})
+
+    with tempfile.TemporaryDirectory() as temp:
+        secret = Path(temp) / "login-control-secret"
+        secret.write_text("b" * 64, encoding="utf-8")
+        os.chmod(secret, 0o600)
+        reauth_settings = settings(
+            backend="upstream",
+            upstream_health_path="/healthz",
+            login_control_url="http://127.0.0.1:8340",
+            login_control_secret_file=str(secret),
+        )
+        with TestClient(
+            create_app(
+                reauth_settings,
+                upstream_transport=httpx.MockTransport(upstream_handler),
+                login_control_transport=httpx.MockTransport(control_handler),
+            )
+        ) as client:
+            started = client.post(
+                "/internal/accounts/legacy-primary/reauth/start",
+                headers=headers(),
+            )
+            assert started.status_code == 200
+            actions.clear()
+
+            verified = client.post(
+                "/internal/accounts/legacy-primary/reauth/verify",
+                headers=headers(),
+            )
+
+            assert verified.status_code == 409
+            assert actions == ["status", "capture", "restart"]
+            waiting = client.get("/internal/account-pools", headers=headers()).json()
+            account = waiting["accounts"][0]
+            assert account["status"] == "reauth_required"
+            assert account["session_state"] == "expired"
+            assert account["health_status"] == "unhealthy"
+            assert account["available"] is False
+            capacity = client.get(
+                "/internal/account-pools/gpt-default/capacity",
+                headers=headers(),
+                params={"selection_key": "latest:high"},
+            )
+            assert capacity.status_code == 200
+            assert capacity.json()["admission_capacity"] == 0
+            assert capacity.json()["provider_admission_capacity"] == 0
+            assert capacity.json()["global_admission_capacity"] == 0
+
+
+def test_account_reauth_stays_blocked_when_post_restart_probe_fails() -> None:
+    actions: list[str] = []
+
+    def upstream_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/OpenaiAccount/auth/capture":
+            actions.append("capture")
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/healthz":
+            actions.append("probe")
+            return httpx.Response(401, json={"ok": False})
+        return httpx.Response(404)
+
+    def control_handler(request: httpx.Request) -> httpx.Response:
+        action = request.url.path.rsplit("/", 1)[-1]
+        actions.append(action)
+        if action in {"status", "open"}:
+            return httpx.Response(
+                200,
+                json={
+                    "account_id": "legacy-primary",
+                    "configured": True,
+                    "browser_state": "ready",
+                },
+            )
+        if action == "restart":
+            return httpx.Response(
+                200,
+                json={
+                    "account_id": "legacy-primary",
+                    "configured": True,
+                    "browser_state": "stopped",
+                },
+            )
+        return httpx.Response(404, json={"detail": "missing"})
+
+    with tempfile.TemporaryDirectory() as temp:
+        secret = Path(temp) / "login-control-secret"
+        secret.write_text("b" * 64, encoding="utf-8")
+        os.chmod(secret, 0o600)
+        reauth_settings = settings(
+            backend="upstream",
+            upstream_health_path="/healthz",
+            login_control_url="http://127.0.0.1:8340",
+            login_control_secret_file=str(secret),
+        )
+        with TestClient(
+            create_app(
+                reauth_settings,
+                upstream_transport=httpx.MockTransport(upstream_handler),
+                login_control_transport=httpx.MockTransport(control_handler),
+            )
+        ) as client:
+            started = client.post(
+                "/internal/accounts/legacy-primary/reauth/start",
+                headers=headers(),
+            )
+            assert started.status_code == 200
+            actions.clear()
+
+            verified = client.post(
+                "/internal/accounts/legacy-primary/reauth/verify",
+                headers=headers(),
+            )
+
+            assert verified.status_code == 409
+            assert (
+                "worker 重启后的真实检查未通过"
+                in verified.json()["error"]["message"]
+            )
+            assert actions == [
+                "status",
+                "capture",
+                "restart",
+                "probe",
+                "probe",
+                "probe",
+            ]
             waiting = client.get("/internal/account-pools", headers=headers()).json()
             assert waiting["accounts"][0]["status"] == "reauth_required"
 

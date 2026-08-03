@@ -634,7 +634,29 @@ def test_gpt4free_overlay_captures_login_without_sending_a_chat() -> None:
     assert '+                    "auth_OpenaiChat.json",' in overlay
     assert "+                cache_file.chmod(0o600)" in overlay
     assert "+                    os.fsync(directory_fd)" in overlay
-    assert '+                await provider.login()' in overlay
+    reset_marker = "+                provider.reset_auth_state_for_capture()"
+    login_marker = "+                await provider.login(force_browser=True)"
+    assert reset_marker in overlay
+    assert overlay.index(reset_marker) < overlay.index(login_marker)
+    assert login_marker in overlay
+    assert "+    def reset_auth_state_for_capture(cls) -> None:" in overlay
+    assert "+        cls.request_config = RequestConfig()" in overlay
+    assert "+        force_browser: bool = False," in overlay
+    assert "+        if force_browser:" in overlay
+    assert "+            await cls.nodriver_auth(proxy)" in overlay
+    assert (
+        "+        async for chunk in cls.login_generator(proxy=proxy, **kwargs):"
+        in overlay
+    )
+    active_marker = "+            if self.turtle_openai_auth_capture_active:"
+    start_marker = "+            self.turtle_openai_auth_capture_active = True"
+    finish_marker = "+                self.turtle_openai_auth_capture_active = False"
+    assert active_marker in overlay
+    assert start_marker in overlay
+    assert finish_marker in overlay
+    assert overlay.index(active_marker) < overlay.index(start_marker)
+    assert overlay.index(start_marker) < overlay.index(reset_marker)
+    assert overlay.index(reset_marker) < overlay.index(finish_marker)
     assert '+                request_url = getattr(request, "url", None)' in overlay
     assert (
         '+                if not isinstance(request_url, str) '

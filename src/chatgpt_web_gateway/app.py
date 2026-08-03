@@ -696,6 +696,9 @@ def create_app(
             connection_pool=shared_database_pool,
         )
         application.state.image_stages = ImageStageRegistry()
+        # One Uvicorn process serves each active slot; reject duplicate
+        # account verification while its capture/restart/probe is in flight.
+        application.state.account_reauth_in_progress = set()
         await application.state.account_pool.start()
         await application.state.project_usage.start()
         await application.state.upstream_cleanup.start()
@@ -1270,6 +1273,12 @@ def create_app(
     )
     async def verify_account_reauth(account_id: str, request: Request):
         pool = request.app.state.account_pool
+        reauth_in_progress: set[str] = (
+            request.app.state.account_reauth_in_progress
+        )
+        if account_id in reauth_in_progress:
+            return account_error(AccountPoolConflict("账号正在验证，请勿重复提交"), 409)
+        reauth_in_progress.add(account_id)
         try:
             await pool.begin_reauth(account_id)
             account = await asyncio.to_thread(pool.store.account, account_id)
@@ -1295,11 +1304,6 @@ def create_app(
             if not captured.get("ok"):
                 raise LoginControlError(
                     f"未能从安全登录页捕获登录状态；请确认已进入 {provider_label} 首页后重试"
-                )
-            live = await pool.probe_account(account_id, persist=False)
-            if not live.get("ok"):
-                raise LoginControlError(
-                    "登录状态已捕获，但真实账号检查未通过；请稍后重试"
                 )
             await request.app.state.login_control.restart(account_id)
             final: dict[str, Any] | None = None
@@ -1334,6 +1338,8 @@ def create_app(
             return account_error(exc, 409)
         except (LoginControlError, LoginControlUnavailable, LoginRuntimeMissing) as exc:
             return login_error(exc)
+        finally:
+            reauth_in_progress.discard(account_id)
 
     @application.post(
         "/internal/account-pools/{pool_id}/probe", dependencies=[Depends(require_key)]
