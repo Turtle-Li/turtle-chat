@@ -1,5 +1,5 @@
 diff --git a/g4f/Provider/needs_auth/OpenaiChat.py b/g4f/Provider/needs_auth/OpenaiChat.py
-index 36d75ec..9ccee9c 100644
+index 36d75ec61be741339d7131ec304818bcd9cc1878..bb0bac5c7eb81c1087a61c46efaf078973181b8e 100644
 --- a/g4f/Provider/needs_auth/OpenaiChat.py
 +++ b/g4f/Provider/needs_auth/OpenaiChat.py
 @@ -4,15 +4,24 @@ import asyncio
@@ -4149,15 +4149,17 @@ index 36d75ec..9ccee9c 100644
          if cls._expires is not None and (cls._expires - 60 * 10) < time.time():
              cls._headers = cls._api_key = None
          if cls._headers is None or headers is not None:
-@@ -1090,33 +4439,36 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1090,33 +4439,41 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
      @classmethod
      async def nodriver_auth(cls, proxy: str = None):
          async with get_nodriver_session(proxy=proxy) as browser:
 -            page = await browser.get(cls.url)
 +            page = await browser.get(cls.url, new_tab=True)
++            session_token_authoritative = False
  
              def on_request(event: nodriver.cdp.network.RequestWillBeSent, page=None):
 -                if not hasattr(event, "request"):
++                nonlocal session_token_authoritative
 +                request = getattr(event, "request", None)
 +                request_url = getattr(request, "url", None)
 +                request_headers = getattr(request, "headers", None)
@@ -4186,7 +4188,10 @@ index 36d75ec..9ccee9c 100644
 -                elif event.request.url == arkose_url:
 +                    if "OpenAI-Sentinel-Turnstile-Token" in request_headers:
 +                        cls.request_config.turnstile_token = request_headers["OpenAI-Sentinel-Turnstile-Token"]
-+                    if "Authorization" in request_headers:
++                    if (
++                        "Authorization" in request_headers
++                        and not session_token_authoritative
++                    ):
 +                        cls._api_key = request_headers["Authorization"].split()[-1]
 +                elif request_url == arkose_url:
                      cls.request_config.arkose_request = arkReq(
@@ -4202,7 +4207,7 @@ index 36d75ec..9ccee9c 100644
                      )
  
              await page.send(nodriver.cdp.network.enable())
-@@ -1124,29 +4476,31 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
+@@ -1124,42 +4481,48 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
              await page.reload()
              user_agent = await page.evaluate("window.navigator.userAgent", return_by_value=True)
              debug.log(f"OpenaiChat: User-Agent: {user_agent}")
@@ -4229,6 +4234,13 @@ index 36d75ec..9ccee9c 100644
 -            except TimeoutError:
 -                pass
 -            while True:
+-                body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
+-                if hasattr(body, "value"):
+-                    body = body.value
+-                if body:
+-                    match = re.search(r'"accessToken":"(.+?)"', body)
+-                    if match:
+-                        cls._api_key = match.group(1)
 +            session_token = await page.evaluate("""
 +                (async () => {
 +                    try {
@@ -4252,23 +4264,34 @@ index 36d75ec..9ccee9c 100644
 +                session_token = session_token.value
 +            if isinstance(session_token, str) and session_token:
 +                cls._api_key = session_token
-+            deadline = time.monotonic() + 30
-+            while time.monotonic() < deadline:
-                 body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
-                 if hasattr(body, "value"):
-                     body = body.value
-@@ -1159,7 +4513,9 @@ class OpenaiChat(AsyncAuthedProvider, ProviderModelMixin):
-                     break
-                 await asyncio.sleep(1)
-                 debug.log("OpenaiChat: Waiting for access token...")
++                session_token_authoritative = True
++            if cls._api_key is None:
++                deadline = time.monotonic() + 30
++                while time.monotonic() < deadline:
++                    body = await page.evaluate("JSON.stringify(window.__remixContext)", return_by_value=True)
++                    if hasattr(body, "value"):
++                        body = body.value
++                    if body:
++                        match = re.search(r'"accessToken":"(.+?)"', body)
++                        if match:
++                            cls._api_key = match.group(1)
++                            break
++                    if cls._api_key is not None or not cls.needs_auth:
+                         break
+-                if cls._api_key is not None or not cls.needs_auth:
+-                    break
+-                await asyncio.sleep(1)
+-                debug.log("OpenaiChat: Waiting for access token...")
 -            debug.log(f"OpenaiChat: Access token: {'False' if cls._api_key is None else cls._api_key[:12] + '...'}")
-+            else:
-+                raise MissingAuthError("ChatGPT login was not detected")
++                    await asyncio.sleep(1)
++                    debug.log("OpenaiChat: Waiting for access token...")
++                else:
++                    raise MissingAuthError("ChatGPT login was not detected")
 +            debug.log(f"OpenaiChat: Access token: {'No' if cls._api_key is None else 'Yes'}")
              #while True:
              #    if cls.request_config.proof_token:
              #        break
-@@ -1238,6 +4594,22 @@ class Conversation(JsonConversation):
+@@ -1238,6 +4601,22 @@ class Conversation(JsonConversation):
          self.prompt = None
          self.generated_images: ImagePreview = None
          self.task: dict = None
@@ -4291,7 +4314,7 @@ index 36d75ec..9ccee9c 100644
  
  
  def get_cookies(
-@@ -1254,7 +4626,7 @@ def get_cookies(
+@@ -1254,7 +4633,7 @@ def get_cookies(
      return {c["name"]: c["value"] for c in json['cookies']} if 'cookies' in json else {}
  
  
@@ -4300,7 +4323,7 @@ index 36d75ec..9ccee9c 100644
      list: List[Dict[str, str]]
  
      def __init__(self, sources: List[Dict[str, str]]) -> None:
-@@ -1294,8 +4666,7 @@ class OpenAISources(ResponseType):
+@@ -1294,8 +4673,7 @@ class OpenAISources(ResponseType):
          return "\n\n\n\n" + ("\n>\n".join([
              f"> [{idx + 1}] {format_link(link['url'], link.get('title', ''))}"
              for idx, link in enumerate(self.list)
@@ -4310,7 +4333,7 @@ index 36d75ec..9ccee9c 100644
      def get_ref_info(self, source: Dict[str, str]) -> dict[str, str | int] | None:
          ref_index = source.get("ref_id", {}).get("ref_index", None)
          ref_type = source.get("ref_id", {}).get("ref_type", None)
-@@ -1345,9 +4716,25 @@ class ContentReferences:
+@@ -1345,9 +4723,25 @@ class ContentReferences:
          self.list: List[Dict[str, Any]] = []
  
      def add_reference(self, reference_part: dict) -> None:
@@ -4337,7 +4360,7 @@ index 36d75ec..9ccee9c 100644
          while len(self.list) <= idx:
              self.list.append({})
  
-@@ -1357,25 +4744,34 @@ class ContentReferences:
+@@ -1357,25 +4751,34 @@ class ContentReferences:
          while len(self.list) <= idx:
              self.list.append({})
  
@@ -4385,7 +4408,7 @@ index 36d75ec..9ccee9c 100644
              self,
 diff --git a/g4f/Provider/openai/media_pump.py b/g4f/Provider/openai/media_pump.py
 new file mode 100644
-index 0000000..d351aaf
+index 0000000000000000000000000000000000000000..d351aaf3be589a781efae2c1ade853af8f4e2e41
 --- /dev/null
 +++ b/g4f/Provider/openai/media_pump.py
 @@ -0,0 +1,664 @@
@@ -5054,7 +5077,7 @@ index 0000000..d351aaf
 +        **_source_metrics(result),
 +    }
 diff --git a/g4f/Provider/openai/models.py b/g4f/Provider/openai/models.py
-index 1832560..e9f4f09 100644
+index 18325600232a1428d52a23f453e44cf84e72c78b..e9f4f0989dd3154da90a3ed12e19331e642a8298 100644
 --- a/g4f/Provider/openai/models.py
 +++ b/g4f/Provider/openai/models.py
 @@ -1,14 +1,19 @@
@@ -5081,7 +5104,7 @@ index 1832560..e9f4f09 100644
 \ No newline at end of file
 +}
 diff --git a/g4f/api/__init__.py b/g4f/api/__init__.py
-index 634022a..5c1c87a 100644
+index 634022a7ea298809e257e70f294594b5aeab10a1..fbdaaf3bd40d9354d742df8bb7c1d0b5a7da440e 100644
 --- a/g4f/api/__init__.py
 +++ b/g4f/api/__init__.py
 @@ -45,7 +45,7 @@ try:
@@ -5111,7 +5134,7 @@ index 634022a..5c1c87a 100644
  
      security = HTTPBearer(auto_error=False)
      basic_security = HTTPBasic()
-@@ -673,6 +675,271 @@ class Api:
+@@ -673,6 +675,277 @@ class Api:
              except Exception as e:
                  return ErrorResponse.from_message(f"{type(e).__name__}: {e}", HTTP_500_INTERNAL_SERVER_ERROR)
  
@@ -5148,6 +5171,12 @@ index 634022a..5c1c87a 100644
 +                    raise MissingAuthError
 +                provider.reset_auth_state_for_capture()
 +                await provider.login(force_browser=True)
++                captured_identity = await asyncio.wait_for(
++                    provider.get_quota(),
++                    timeout=20.0,
++                )
++                if not isinstance(captured_identity, dict):
++                    raise MissingAuthError
 +                if not cache_file.is_file() or cache_file.is_symlink():
 +                    raise MissingAuthError
 +                cache_file.chmod(0o600)
@@ -5383,7 +5412,7 @@ index 634022a..5c1c87a 100644
          @self.app.get("/v1/models/{model_name}", responses={
              HTTP_200_OK: {"model": ModelResponseModel},
              HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
-@@ -710,6 +977,7 @@ class Api:
+@@ -710,6 +983,7 @@ class Api:
              conversation_id: str = None,
              x_user: Annotated[str | None, Header()] = None,
          ):
@@ -5391,7 +5420,7 @@ index 634022a..5c1c87a 100644
              if provider is not None:
                  config.provider = provider
              if config.provider is None:
-@@ -751,6 +1019,27 @@ class Api:
+@@ -751,6 +1025,27 @@ class Api:
                              example = json.dumps({"media": [["data:image/jpeg;base64,...", "filename.jpg"]]})
                              return ErrorResponse.from_message(f'The media you send must be a data URIs. Example: {example}', status_code=HTTP_422_UNPROCESSABLE_CONTENT)
  
@@ -5419,7 +5448,7 @@ index 634022a..5c1c87a 100644
                  # Create the completion response
                  response = self.client.chat.completions.create(
                      **filter_none(
-@@ -763,6 +1052,7 @@ class Api:
+@@ -763,6 +1058,7 @@ class Api:
                                  "provider": provider,
                                  "conversation_id": None,
                                  "conversation": conversation,
@@ -5427,7 +5456,7 @@ index 634022a..5c1c87a 100644
                                  "user": x_user,
                              }
                          },
-@@ -770,25 +1060,49 @@ class Api:
+@@ -770,25 +1066,49 @@ class Api:
                      ),
                  )
  
@@ -5485,7 +5514,7 @@ index 634022a..5c1c87a 100644
                                  yield f"data: {chunk.model_dump_json() if hasattr(chunk, 'model_dump_json') else chunk.json()}\n\n"
                      except GeneratorExit:
                          pass
-@@ -801,6 +1115,9 @@ class Api:
+@@ -801,6 +1121,9 @@ class Api:
                      yield "data: [DONE]\n\n"
                  headers = getattr(first_chunk, "_headers").get_dict() if hasattr(first_chunk, "_headers") else {}
                  headers = {k.encode("latin-1","ignore").decode("latin-1"): v.encode("latin-1","ignore").decode("latin-1") for k, v in headers.items()}
@@ -5495,7 +5524,7 @@ index 634022a..5c1c87a 100644
                  return StreamingResponse(
                      streaming(),
                      media_type="text/event-stream",
-@@ -1050,6 +1367,7 @@ class Api:
+@@ -1050,6 +1373,7 @@ class Api:
              HTTP_200_OK: {"model": ImagesResponse},
              HTTP_401_UNAUTHORIZED: {"model": ErrorResponseModel},
              HTTP_404_NOT_FOUND: {"model": ErrorResponseModel},
@@ -5503,7 +5532,7 @@ index 634022a..5c1c87a 100644
              HTTP_429_TOO_MANY_REQUESTS: {"model": ErrorResponseModel},
              HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponseModel},
          }
-@@ -1074,12 +1392,42 @@ class Api:
+@@ -1074,12 +1398,42 @@ class Api:
              if config.api_key is None and credentials is not None and credentials.credentials != "secret":
                  config.api_key = credentials.credentials
              try:
@@ -5549,7 +5578,7 @@ index 634022a..5c1c87a 100644
                  for image in response.data:
                      if hasattr(image, "url") and image.url.startswith("/"):
                          image.url = f"{request.base_url}{image.url.lstrip('/')}"
-@@ -1087,9 +1435,21 @@ class Api:
+@@ -1087,9 +1441,21 @@ class Api:
              except (ModelNotFoundError, ProviderNotFoundError) as e:
                  logger.exception(e)
                  return ErrorResponse.from_exception(e, config, HTTP_404_NOT_FOUND)
@@ -5572,7 +5601,7 @@ index 634022a..5c1c87a 100644
                  logger.exception(e)
                  return ErrorResponse.from_exception(e, config, HTTP_500_INTERNAL_SERVER_ERROR)
 diff --git a/g4f/api/stubs.py b/g4f/api/stubs.py
-index facb4a4..08ebfa2 100644
+index facb4a42b4162f95d39e663e6d2e76d8940f4743..08ebfa2b5958d9c3d8645568db9e40afe01b8479 100644
 --- a/g4f/api/stubs.py
 +++ b/g4f/api/stubs.py
 @@ -115,6 +115,9 @@ class ImageGenerationConfig(BaseModel):
@@ -5586,7 +5615,7 @@ index facb4a4..08ebfa2 100644
      api_key: Optional[str] = None
      width: Optional[int] = None
 diff --git a/g4f/client/__init__.py b/g4f/client/__init__.py
-index 0072f7b..cee0e0b 100644
+index 0072f7bc6ebe46d995245dbba438b6796c19b43f..cee0e0b789d0e08400c783a47d172c29df97e4aa 100644
 --- a/g4f/client/__init__.py
 +++ b/g4f/client/__init__.py
 @@ -13,7 +13,7 @@ from ..image.copy_images import copy_media, get_media_dir
@@ -5832,7 +5861,7 @@ index 0072f7b..cee0e0b 100644
 \ No newline at end of file
 +        )
 diff --git a/g4f/client/stubs.py b/g4f/client/stubs.py
-index b6fcefc..066fcab 100644
+index b6fcefc9fdf1f041516579584ccd899751dbd7a4..066fcab81f7c631c34396885f71a3968bfc68add 100644
 --- a/g4f/client/stubs.py
 +++ b/g4f/client/stubs.py
 @@ -7,7 +7,7 @@ from time import time
@@ -5914,7 +5943,7 @@ index b6fcefc..066fcab 100644
 +            turtle_usage=turtle_usage,
          )
 diff --git a/g4f/errors.py b/g4f/errors.py
-index c5b47db..032f108 100644
+index c5b47dbef54cf869bda68f2fe402555480603bb3..032f1082625cc0e1a0570f5f61b40dfbe1003313 100644
 --- a/g4f/errors.py
 +++ b/g4f/errors.py
 @@ -68,6 +68,11 @@ class NoMediaResponseError(G4FError):
@@ -5937,7 +5966,7 @@ index c5b47db..032f108 100644
 \ No newline at end of file
 +    pass
 diff --git a/g4f/providers/base_provider.py b/g4f/providers/base_provider.py
-index cf7bd36..f7b0b4d 100644
+index cf7bd368a0c797156171fdd5f00994209bac3552..f7b0b4d0154c6e07ef8ebb5e63e123b47be0adba 100644
 --- a/g4f/providers/base_provider.py
 +++ b/g4f/providers/base_provider.py
 @@ -226,7 +226,7 @@ class AsyncGeneratorProvider(AbstractProvider):
@@ -5962,7 +5991,7 @@ index cf7bd36..f7b0b4d 100644
                  raise RuntimeError(f"Failed to save: {auth_result.get_dict()}\n{type(e).__name__}: {e}")
           # elif cache_file.exists():
 diff --git a/g4f/providers/tool_support.py b/g4f/providers/tool_support.py
-index 94b1088..a8352ab 100644
+index 94b108881d768ac14cff3289db1d931710ed77ae..a8352ab7b98c907bf83213daa19205649189ab4e 100644
 --- a/g4f/providers/tool_support.py
 +++ b/g4f/providers/tool_support.py
 @@ -57,6 +57,18 @@ def _parse_json_maybe(s: str):
@@ -6019,7 +6048,7 @@ index 94b1088..a8352ab 100644
              payload = filter_json(content)
              obj = _parse_json_maybe(payload)
 diff --git a/g4f/requests/__init__.py b/g4f/requests/__init__.py
-index 205a41d..09f27dc 100644
+index 205a41d1deed0fd2f2574e975d807d70164aa343..09f27dc11eb14db0e1f086d5f742536115b35c16 100644
 --- a/g4f/requests/__init__.py
 +++ b/g4f/requests/__init__.py
 @@ -185,26 +185,26 @@ async def get_args_from_cdp(
@@ -6070,7 +6099,7 @@ index 205a41d..09f27dc 100644
              pass
          finally:
 diff --git a/g4f/tools/run_tools.py b/g4f/tools/run_tools.py
-index 8c8c6e7..09b59a7 100644
+index 8c8c6e7323a956c11d44c50b40cbf5bc745f9ff9..09b59a77fce5ce576327520be710c004f7a40bfa 100644
 --- a/g4f/tools/run_tools.py
 +++ b/g4f/tools/run_tools.py
 @@ -31,6 +31,7 @@ from ..config import AppConfig

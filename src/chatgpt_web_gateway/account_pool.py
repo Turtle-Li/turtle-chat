@@ -49,6 +49,9 @@ HEALTH_STATES = {"unknown", "healthy", "degraded", "unhealthy"}
 PROVIDERS = {"gpt", "claude"}
 FAIRNESS_WINDOW_SECONDS = 3 * 60 * 60
 DEGRADED_PROBE_FAILURE_THRESHOLD = 3
+# Forced browser capture can spend 30 seconds waiting for a token, 10 seconds
+# settling the browser session, and 20 seconds on the bounded live quota check.
+GPT_AUTH_CAPTURE_TIMEOUT_SECONDS = 75.0
 
 
 class AccountPoolError(RuntimeError):
@@ -2977,7 +2980,9 @@ class AccountPoolRouter:
                     else "/api/OpenaiAccount/auth/capture"
                 ),
                 auth_capture_timeout_seconds=(
-                    900.0 if account.provider == "claude" else 45.0
+                    900.0
+                    if account.provider == "claude"
+                    else GPT_AUTH_CAPTURE_TIMEOUT_SECONDS
                 ),
                 api_key=self.upstream_api_key,
                 timeout_seconds=self.upstream_timeout_seconds,

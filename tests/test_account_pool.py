@@ -11,6 +11,7 @@ from chatgpt_web_gateway.account_pool import (
     AccountPoolConflict,
     AccountPoolRouter,
     AccountUnavailable,
+    GPT_AUTH_CAPTURE_TIMEOUT_SECONDS,
     MemoryAccountStore,
     PostgresAccountStore,
     _lane_rate_limit_cooldown_seconds,
@@ -1063,6 +1064,16 @@ class AccountPoolRouterTests(unittest.IsolatedAsyncioTestCase):
         ready = (await self.router.snapshot())["accounts"][0]
         self.assertEqual(ready["status"], "ready")
         self.assertTrue(ready["available"])
+
+    async def test_gpt_capture_timeout_contains_browser_and_quota_budgets(self) -> None:
+        account = self.store.account("acct-a")
+        self.assertIsNotNone(account)
+        client = await self.router.client_for(account)
+        self.assertGreater(GPT_AUTH_CAPTURE_TIMEOUT_SECONDS, 30.0 + 10.0 + 20.0)
+        self.assertEqual(
+            client._auth_capture_timeout_seconds,
+            GPT_AUTH_CAPTURE_TIMEOUT_SECONDS,
+        )
 
     async def test_claude_pool_uses_claude_lanes_and_isolated_provider_accounts(self) -> None:
         pool = await self.router.create_pool(

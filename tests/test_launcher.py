@@ -639,6 +639,11 @@ def test_gpt4free_overlay_captures_login_without_sending_a_chat() -> None:
     assert reset_marker in overlay
     assert overlay.index(reset_marker) < overlay.index(login_marker)
     assert login_marker in overlay
+    quota_marker = "+                captured_identity = await asyncio.wait_for("
+    assert quota_marker in overlay
+    assert overlay.index(login_marker) < overlay.index(quota_marker)
+    assert "+                    provider.get_quota()," in overlay
+    assert "+                    timeout=20.0," in overlay
     assert "+    def reset_auth_state_for_capture(cls) -> None:" in overlay
     assert "+        cls.request_config = RequestConfig()" in overlay
     assert "+        force_browser: bool = False," in overlay
@@ -664,11 +669,15 @@ def test_gpt4free_overlay_captures_login_without_sending_a_chat() -> None:
     ) in overlay
     assert '-                        await textarea.send_keys("Hello")' in overlay
     assert '-                await button.click()' in overlay
-    assert '+                raise MissingAuthError("ChatGPT login was not detected")' in overlay
+    assert '+                    raise MissingAuthError("ChatGPT login was not detected")' in overlay
     assert "+            page = await browser.get(cls.url, new_tab=True)" in overlay
     assert '+                        const response = await fetch("/api/auth/session", {' in overlay
     assert '+                        return typeof session.accessToken === "string"' in overlay
     assert '+            """, await_promise=True, return_by_value=True)' in overlay
+    assert "+            session_token_authoritative = False" in overlay
+    assert "+                nonlocal session_token_authoritative" in overlay
+    assert "+                        and not session_token_authoritative" in overlay
+    assert "+                session_token_authoritative = True" in overlay
     assert (
         '+            debug.log(f"OpenaiChat: Access token: '
         "{'No' if cls._api_key is None else 'Yes'}\")"

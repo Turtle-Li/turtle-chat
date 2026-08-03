@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -139,6 +141,116 @@ def test_openai_account_forced_browser_capture_bypasses_stale_har(
     assert browser_calls == ["http://127.0.0.1:17897"]
     assert len(cache_writes) == 1
     assert cache_writes[0][0] == Path("synthetic-auth.json")
+
+
+@requires_runtime
+def test_openai_account_browser_capture_prefers_fresh_session_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakePage:
+        def __init__(self) -> None:
+            self.handler = None
+            self.remix_reads = 0
+
+        async def send(self, command):
+            if command == "get-cookies":
+                return {}
+            return None
+
+        def add_handler(self, _event_type, handler) -> None:
+            self.handler = handler
+
+        async def reload(self) -> None:
+            return None
+
+        async def evaluate(self, expression: str, **_kwargs):
+            if expression == "window.navigator.userAgent":
+                return "Synthetic Browser"
+            if "/api/auth/session" in expression:
+                return "fresh-session-token"
+            if expression == "JSON.stringify(window.__remixContext)":
+                self.remix_reads += 1
+                return '{"accessToken":"stale-remix-token"}'
+            if "data-build" in expression:
+                assert self.handler is not None
+                self.handler(
+                    SimpleNamespace(
+                        request=SimpleNamespace(
+                            url=openai_chat_module.backend_url,
+                            headers={
+                                "Authorization": "Bearer stale-network-token"
+                            },
+                        )
+                    )
+                )
+                return "synthetic-build"
+            raise AssertionError(f"unexpected browser evaluation: {expression}")
+
+        async def close(self) -> None:
+            return None
+
+    class FakeBrowser:
+        def __init__(self, page: FakePage) -> None:
+            self.page = page
+
+        async def get(self, _url: str, *, new_tab: bool):
+            assert new_tab is True
+            return self.page
+
+    page = FakePage()
+
+    @contextlib.asynccontextmanager
+    async def fake_nodriver_session(*, proxy: str | None = None):
+        assert proxy == "http://127.0.0.1:17897"
+        yield FakeBrowser(page)
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    selected_tokens: list[str | None] = []
+
+    def fake_set_api_key(cls, api_key: str | None) -> bool:
+        selected_tokens.append(api_key)
+        cls._api_key = api_key
+        return bool(api_key)
+
+    fake_nodriver = SimpleNamespace(
+        cdp=SimpleNamespace(
+            network=SimpleNamespace(
+                RequestWillBeSent=object,
+                enable=lambda: "network-enable",
+            )
+        )
+    )
+    monkeypatch.setattr(
+        openai_chat_module,
+        "get_nodriver_session",
+        fake_nodriver_session,
+    )
+    monkeypatch.setattr(openai_chat_module, "nodriver", fake_nodriver)
+    monkeypatch.setattr(
+        openai_chat_module,
+        "get_cookies",
+        lambda _urls: "get-cookies",
+    )
+    monkeypatch.setattr(openai_chat_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        OpenaiAccount,
+        "_set_api_key",
+        classmethod(fake_set_api_key),
+    )
+    monkeypatch.setattr(OpenaiAccount, "request_config", RequestConfig())
+    monkeypatch.setattr(OpenaiAccount, "_api_key", None)
+    monkeypatch.setattr(OpenaiAccount, "_headers", None)
+    monkeypatch.setattr(OpenaiAccount, "_cookies", None)
+
+    asyncio.run(
+        OpenaiAccount.nodriver_auth(proxy="http://127.0.0.1:17897")
+    )
+
+    assert page.remix_reads == 0
+    assert selected_tokens[-1] == "fresh-session-token"
+    assert OpenaiAccount._api_key == "fresh-session-token"
 
 
 @requires_runtime
